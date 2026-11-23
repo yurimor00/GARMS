@@ -15,7 +15,7 @@ Guarda-roupa digital: fotografar peças, criar conjuntos, registar o que se usou
 | [services/account-papi/](services/account-papi/) | Account PAPI (3004) |
 | [services/planner-papi/](services/planner-papi/) | Planner PAPI (3005) |
 | [services/wardrobe-papi/](services/wardrobe-papi/) | Wardrobe PAPI (3006) |
-| [services/recommendation/](services/recommendation/) | Recommendation Service (3007) |
+| [services/ms-recommendation/](services/ms-recommendation/) | Recommendation Service (3007) |
 | [contracts/](contracts/) | Contratos OpenAPI 3.1 (fonte de verdade) |
 | [database/](database/) | Modelo `dw_schemas.mwb`, migrações e seeds |
 | [tests/api/](tests/api/) | Testes de API (pytest) |

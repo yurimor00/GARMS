@@ -1,0 +1,48 @@
+# Dependências
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Builds
+dist/
+build/
+coverage/
+
+# Segredos e configuração local
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Testes
+test-results/
+playwright-report/
+report.html
+.pytest_cache/
+tests/e2e/.auth/
+storageState*.json
+
+# Logs e SO
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# MySQL Workbench (backups automáticos)
+*.mwb.bak
+*.mwb.beforeMigration
+
+# Ficheiros locais do assistente (não versionar)
+CLAUDE.md
+CLAUDE.local.md
+**/CLAUDE.md
+.claude/
+.mcp.json

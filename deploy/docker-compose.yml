@@ -1,0 +1,37 @@
+# GARMS: ambiente local (Docker Desktop)
+# Correr a partir da raiz do repositório:
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d
+# Por agora só tem o MySQL; RabbitMQ, Redis, serviços e frontend entram aqui depois.
+
+name: garms
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: garms-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Falta MYSQL_ROOT_PASSWORD no .env}
+      MYSQL_PW_USER_SAPI: ${MYSQL_PW_USER_SAPI:?Falta MYSQL_PW_USER_SAPI no .env}
+      MYSQL_PW_WARDROBE_SAPI: ${MYSQL_PW_WARDROBE_SAPI:?Falta MYSQL_PW_WARDROBE_SAPI no .env}
+      MYSQL_PW_RECO: ${MYSQL_PW_RECO:?Falta MYSQL_PW_RECO no .env}
+    command:
+      # Instantes guardados em UTC (convenção da BD)
+      - --default-time-zone=+00:00
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - garms-mysql-data:/var/lib/mysql
+      # Os mesmos scripts que se correm no Azure (fonte única)
+      - ../database:/garms/database:ro
+      - ./mysql/00-init.sh:/docker-entrypoint-initdb.d/00-init.sh:ro
+    healthcheck:
+      # 127.0.0.1 (TCP) para só ficar "healthy" depois do init terminar
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h 127.0.0.1 -uroot --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  garms-mysql-data:

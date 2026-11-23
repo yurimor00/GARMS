@@ -1,0 +1,91 @@
+# Constrói as imagens Docker do frontend e dos serviços.
+# - Pull request para a main: só constrói (verifica que o build não está partido).
+# - Merge (push) na main: constrói e publica no GHCR como ghcr.io/<dono>/garms-<pasta>.
+# Só entram as pastas que já têm Dockerfile (frontend/ e services/*/).
+
+name: Imagens Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  detetar:
+    name: Detetar serviços com Dockerfile
+    runs-on: ubuntu-latest
+    outputs:
+      servicos: ${{ steps.lista.outputs.servicos }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: lista
+        run: |
+          servicos=$(
+            for f in frontend/Dockerfile services/*/Dockerfile; do
+              [ -f "$f" ] || continue
+              dir=$(dirname "$f")
+              jq -nc --arg nome "$(basename "$dir")" --arg contexto "$dir" '{nome: $nome, contexto: $contexto}'
+            done | jq -sc '.'
+          )
+          echo "servicos=$servicos" >> "$GITHUB_OUTPUT"
+          echo "Serviços encontrados: $servicos"
+
+  build:
+    name: ${{ matrix.servico.nome }}
+    needs: detetar
+    if: needs.detetar.outputs.servicos != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        servico: ${{ fromJson(needs.detetar.outputs.servicos) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Nome da imagem
+        id: imagem
+        run: |
+          dono=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "nome=ghcr.io/${dono}/garms-${{ matrix.servico.nome }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login no GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags e labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.imagem.outputs.nome }}
+          tags: |
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build (e push na main)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.servico.contexto }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.servico.nome }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.servico.nome }}

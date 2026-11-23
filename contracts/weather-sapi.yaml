@@ -1,0 +1,372 @@
+openapi: 3.1.0
+info:
+  title: Digital Wardrobe — Weather SAPI (System API)
+  version: 2.0.0
+  description: |-
+    System API da meteorologia: previsão e pesquisa de cidades (Open-Meteo) e alertas (webhook do fornecedor de alertas).
+
+    - **Consumidores:** EAPI (leitura direta e webhook), Recommendation Service, Planner PAPI; CronJob do Kubernetes (atualização periódica).
+    - **Publica:** `weather.updated` (atualização de 30 em 30 min, só se a previsão mudou) e `weather.alert`.
+    - **Consome:** `user.location.updated` (passa a seguir esse local e regista-o no fornecedor de alertas).
+    - **Sem tabelas:** a cache da previsão (TTL 30 min, chave = latitude e longitude arredondadas a 2 casas), os locais seguidos e os alertIds já vistos (TTL 24 h) ficam no **Redis**, partilhados por todas as réplicas. São dados temporários e recuperáveis das fontes externas.
+
+    IDs inteiros e nomes de campos iguais às colunas da base de dados. Erros no formato `Erro`. Todos os pedidos levam `X-Internal-Api-Key`.
+servers:
+- url: http://weather-sapi.internal:3003/api/v1
+  description: Rede privada (não acessível da internet)
+- url: http://localhost:3003/api/v1
+  description: Desenvolvimento local
+security:
+- chaveInterna: []
+tags:
+- name: Previsão
+- name: Alertas
+- name: Tarefas
+paths:
+  /forecast:
+    get:
+      operationId: getForecast
+      summary: Previsão para um local
+      description: |-
+        **Usado por:** EAPI em leitura direta (SUG-03), Recommendation Service (SUG-01, SUG-02), Planner PAPI (HIS-01).
+
+        Responde da cache no Redis (30 min); se expirou, chama o Open-Meteo e guarda o resultado.
+      tags:
+      - Previsão
+      parameters:
+      - name: latitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: 37.74
+          minimum: -90
+          maximum: 90
+      - name: longitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: -25.67
+          minimum: -180
+          maximum: 180
+      - name: cidade
+        in: query
+        required: false
+        schema:
+          type: string
+          example: Ponta Delgada
+        description: Alternativa a latitude + longitude
+      responses:
+        '200':
+          description: Previsão
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meteorologia'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          description: Sem localização
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SEM_LOCALIZACAO
+                mensagem: Sem localização
+        '503':
+          description: Open-Meteo indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: METEO_INDISPONIVEL
+                mensagem: Open-Meteo indisponível
+  /geocoding:
+    get:
+      operationId: searchLocations
+      summary: Procurar cidades
+      description: '**Usado por:** EAPI em leitura direta (SUG-04). Usa o geocoding do Open-Meteo.'
+      tags:
+      - Previsão
+      parameters:
+      - name: q
+        in: query
+        required: true
+        schema:
+          type: string
+          example: Ponta
+          minLength: 2
+      responses:
+        '200':
+          description: Cidades
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Cidade'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          description: Pesquisa com menos de 2 letras
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: PESQUISA_CURTA
+                mensagem: Pesquisa com menos de 2 letras
+        '503':
+          description: Open-Meteo indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: METEO_INDISPONIVEL
+                mensagem: Open-Meteo indisponível
+  /alerts:
+    post:
+      operationId: ingestWeatherAlert
+      summary: Registar um alerta recebido por webhook
+      description: |-
+        **Usado por:** EAPI (SUG-07), depois de validar a assinatura.
+
+        Ignora alertIds já recebidos (conjunto no Redis com TTL de 24 h, partilhado pelas réplicas).
+
+        **Publica:** `weather.alert` (só se for novo).
+      tags:
+      - Alertas
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertaRegistar'
+      responses:
+        '202':
+          description: Aceite ou ignorado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertaAceite'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /jobs/refresh-forecasts:
+    post:
+      operationId: refreshForecasts
+      summary: Atualizar a previsão dos locais seguidos
+      description: |-
+        **Usado por:** CronJob do Kubernetes, de 30 em 30 minutos. Como o CronJob corre uma só vez, a tarefa não se repete quando há várias réplicas.
+
+        Para cada local seguido, pede a previsão ao Open-Meteo, atualiza a cache e, se mudou, publica `weather.updated`.
+
+        **Publica:** `weather.updated`.
+      tags:
+      - Tarefas
+      responses:
+        '202':
+          description: Atualização feita
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultadoAtualizacao'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '503':
+          description: Open-Meteo indisponível; a cache antiga mantém-se
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: METEO_INDISPONIVEL
+                mensagem: Open-Meteo indisponível
+components:
+  securitySchemes:
+    chaveInterna:
+      type: apiKey
+      in: header
+      name: X-Internal-Api-Key
+      description: Chave partilhada entre serviços na rede privada. Só a EAPI é pública.
+  schemas:
+    Cidade:
+      type: object
+      properties:
+        cidade:
+          type: string
+          example: Ponta Delgada
+        pais:
+          type: string
+          example: Portugal
+        latitude:
+          type: number
+          example: 37.74
+        longitude:
+          type: number
+          example: -25.67
+      required:
+      - cidade
+      - pais
+      - latitude
+      - longitude
+    Meteorologia:
+      type: object
+      properties:
+        temperatura:
+          type: number
+          example: 17.5
+          description: °C
+        estado:
+          type: string
+          example: chuva
+        min:
+          type: number
+          example: 14.0
+        max:
+          type: number
+          example: 19.0
+        chuva:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 70
+          description: Probabilidade de precipitação (%)
+        atualizadoEm:
+          type: string
+          format: date-time
+          example: '2026-11-19T08:00:00Z'
+      required:
+      - temperatura
+      - estado
+      - min
+      - max
+      - chuva
+      - atualizadoEm
+    Erro:
+      type: object
+      properties:
+        codigo:
+          type: string
+          example: NAO_ENCONTRADO
+        mensagem:
+          type: string
+          example: Recurso não encontrado.
+        campos:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+                example: nome
+              erro:
+                type: string
+                example: máximo 45 caracteres
+          description: Só nos erros de validação (422)
+      required:
+      - codigo
+      - mensagem
+    AlertaRegistar:
+      type: object
+      properties:
+        alertId:
+          type: string
+          example: tmrw-alert-98765
+          description: Usado para ignorar repetidos
+        locationKey:
+          type: string
+          example: 37.74,-25.67
+        type:
+          type: string
+          example: heavy_rain
+        severity:
+          type: string
+          enum:
+          - minor
+          - moderate
+          - severe
+          - extreme
+          example: moderate
+        startsAt:
+          type: string
+          format: date-time
+          example: '2026-11-19T16:00:00Z'
+        endsAt:
+          type: string
+          format: date-time
+          example: '2026-11-19T20:00:00Z'
+      required:
+      - alertId
+      - locationKey
+      - type
+      - severity
+      - startsAt
+      - endsAt
+    AlertaAceite:
+      type: object
+      properties:
+        alertId:
+          type: string
+          example: tmrw-alert-98765
+        estado:
+          type: string
+          enum:
+          - aceite
+          - repetido_ignorado
+          example: aceite
+      required:
+      - alertId
+      - estado
+    ResultadoAtualizacao:
+      type: object
+      properties:
+        locais:
+          type: integer
+          minimum: 0
+          example: 12
+          description: Locais seguidos que foram consultados
+        alterados:
+          type: integer
+          minimum: 0
+          example: 3
+          description: Locais cuja previsão mudou (um weather.updated por cada)
+      required:
+      - locais
+      - alterados
+  responses:
+    NaoEncontrado:
+      description: Não existe ou não pertence ao utilizador (404 em vez de 403, NFR-05)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_ENCONTRADO
+            mensagem: Recurso não encontrado.
+    Validacao:
+      description: Dados inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: VALIDACAO
+            mensagem: Há campos inválidos.
+            campos:
+            - campo: nome
+              erro: máximo 45 caracteres
+    ChaveInterna:
+      description: Falta ou é inválida a chave interna (X-Internal-Api-Key)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_AUTORIZADO
+            mensagem: Chave interna inválida.

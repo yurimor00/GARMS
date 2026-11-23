@@ -1,0 +1,1512 @@
+openapi: 3.1.0
+info:
+  title: Digital Wardrobe — Wardrobe SAPI (System API)
+  version: 1.0.0
+  description: |-
+    System API de tudo o que é roupa, em `dw_principal`: Categoria, EtiquetaMeteorologica, Peca, PecaEtiquetaMeteorologica, Conjunto, ConjuntoPeca, RegistoUso, RegistoUsoPeca e Evento. É também a única com acesso ao bucket de fotos.
+
+    - **Consumidores:** Wardrobe PAPI, Planner PAPI, Account PAPI (foto de perfil), Recommendation Service e EAPI (só `/catalog`).
+    - **Eventos:** nenhum.
+    - **Tarefas sem endpoint:** gerar miniaturas (estadoFoto) e apagar diariamente fotos não usadas há 24 h.
+
+    IDs inteiros e nomes de campos iguais às colunas da base de dados. Erros no formato `Erro`. Todos os pedidos levam `X-Internal-Api-Key`.
+servers:
+- url: http://wardrobe-sapi.internal:3002/api/v1
+  description: Rede privada (não acessível da internet)
+- url: http://localhost:3002/api/v1
+  description: Desenvolvimento local
+security:
+- chaveInterna: []
+tags:
+- name: Catálogo e agregados
+- name: Peças e fotos
+- name: Conjuntos
+- name: Histórico
+- name: Calendário
+paths:
+  /catalog:
+    get:
+      operationId: getCatalog
+      summary: Obter o catálogo
+      description: '**Usado por:** EAPI em leitura direta (WDB-02). Tabelas Categoria e EtiquetaMeteorologica, mais os valores
+        do SET estacao e do ENUM de estilos.'
+      tags:
+      - Catálogo e agregados
+      responses:
+        '200':
+          description: Catálogo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Catalogo'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+  /stats:
+    get:
+      operationId: getStats
+      summary: Contadores do utilizador
+      description: '**Usado por:** Wardrobe PAPI (ACC-04, PER-04). Não conta peças eliminadas.'
+      tags:
+      - Catálogo e agregados
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      responses:
+        '200':
+          description: Contadores
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContadoresUtilizador'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+  /export:
+    get:
+      operationId: exportWardrobe
+      summary: Exportar o guarda-roupa
+      description: '**Usado por:** Wardrobe PAPI (PER-07).'
+      tags:
+      - Catálogo e agregados
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      responses:
+        '200':
+          description: Dados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportacaoGuardaRoupa'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+  /pieces:
+    get:
+      operationId: listPieces
+      summary: Listar peças
+      description: '**Usado por:** Wardrobe PAPI (WDB-01; OTF-03/04 com `ids` para validar posse), Recommendation Service
+        (SUG-01, SUG-02). Só peças com eliminadaData IS NULL; devolve URLs assinados.'
+      tags:
+      - Peças e fotos
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      - name: ids
+        in: query
+        required: false
+        schema:
+          type: string
+          example: 12,18,31
+        description: idPeca separados por vírgula
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+          example: casaco
+      - name: idCategoria
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          example: 3
+      - name: estacao
+        in: query
+        required: false
+        schema:
+          $ref: '#/components/schemas/Estacao'
+      - name: corNome
+        in: query
+        required: false
+        schema:
+          type: string
+          example: azul
+      - name: favorita
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 24
+      responses:
+        '200':
+          description: Peças
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PecaResumo'
+                required:
+                - items
+          headers:
+            X-Total-Count:
+              description: Número total de resultados (paginação)
+              schema:
+                type: integer
+                example: 34
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+    post:
+      operationId: createPiece
+      summary: Gravar peça
+      description: '**Usado por:** Wardrobe PAPI (ADD-02). Confirma que a foto está na pasta do utilizador, grava Peca e PecaEtiquetaMeteorologica
+        e gera a miniatura.'
+      tags:
+      - Peças e fotos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PecaCriarRegisto'
+      responses:
+        '201':
+          description: Criada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PecaRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          description: Foto inexistente ou de outro utilizador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FOTO_INVALIDA
+                mensagem: Foto inexistente ou de outro utilizador
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /pieces/{idPeca}:
+    parameters:
+    - name: idPeca
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 42
+    - $ref: '#/components/parameters/IdUtilizador'
+    get:
+      operationId: getPiece
+      summary: Obter peça
+      description: '**Usado por:** Wardrobe PAPI (WDB-03).'
+      tags:
+      - Peças e fotos
+      responses:
+        '200':
+          description: Peça
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PecaRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    patch:
+      operationId: updatePiece
+      summary: Alterar peça
+      description: '**Usado por:** Wardrobe PAPI (WDB-04, WDB-05 favorita, WDB-06 eliminadaData).'
+      tags:
+      - Peças e fotos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PecaAlterarRegisto'
+      responses:
+        '200':
+          description: Atualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PecaRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /photos:
+    post:
+      operationId: uploadPhoto
+      summary: Guardar uma imagem no bucket
+      description: '**Usado por:** Wardrobe PAPI (ADD-01, tipo=peca), Account PAPI (PER-02, tipo=avatar). Única porta para
+        o bucket de fotos.'
+      tags:
+      - Peças e fotos
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      - name: tipo
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - peca
+          - avatar
+          default: peca
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FicheiroImagem'
+      responses:
+        '201':
+          description: Guardada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Foto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '413':
+          description: Ficheiro maior que 5 MB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FICHEIRO_GRANDE
+                mensagem: Ficheiro maior que 5 MB
+        '415':
+          description: Formato não suportado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FORMATO_INVALIDO
+                mensagem: Formato não suportado
+    delete:
+      operationId: deleteUserPhotos
+      summary: Apagar todas as fotos de um utilizador
+      description: '**Usado por:** Wardrobe PAPI, ao consumir `user.deleted` (PER-08).'
+      tags:
+      - Peças e fotos
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      responses:
+        '204':
+          description: Apagadas
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+  /outfits:
+    get:
+      operationId: listOutfits
+      summary: Listar conjuntos
+      description: '**Usado por:** Wardrobe PAPI (OTF-01).'
+      tags:
+      - Conjuntos
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      - name: codigoEstilo
+        in: query
+        required: false
+        schema:
+          $ref: '#/components/schemas/Estilo'
+      - name: conjuntoFavorito
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 15
+      responses:
+        '200':
+          description: Conjuntos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Conjunto'
+                required:
+                - items
+          headers:
+            X-Total-Count:
+              description: Número total de resultados (paginação)
+              schema:
+                type: integer
+                example: 34
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+    post:
+      operationId: createOutfit
+      summary: Gravar conjunto
+      description: '**Usado por:** Wardrobe PAPI (OTF-03). Conjunto + ConjuntoPeca.'
+      tags:
+      - Conjuntos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConjuntoCriarRegisto'
+      responses:
+        '201':
+          description: Criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConjuntoRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /outfits/{idConjunto}:
+    parameters:
+    - name: idConjunto
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 9
+    - $ref: '#/components/parameters/IdUtilizador'
+    get:
+      operationId: getOutfit
+      summary: Obter conjunto
+      description: '**Usado por:** Wardrobe PAPI (OTF-02), Planner PAPI (HIS-01, CAL-02, CAL-03: posse, nome e peças).'
+      tags:
+      - Conjuntos
+      responses:
+        '200':
+          description: Conjunto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConjuntoRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    patch:
+      operationId: updateOutfit
+      summary: Alterar conjunto
+      description: '**Usado por:** Wardrobe PAPI (OTF-04, OTF-06 conjuntoFavorito).'
+      tags:
+      - Conjuntos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConjuntoAlterarRegisto'
+      responses:
+        '200':
+          description: Atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConjuntoRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteOutfit
+      summary: Eliminar conjunto
+      description: '**Usado por:** Wardrobe PAPI (OTF-05). RegistoUso e Evento ficam com idConjunto = NULL.'
+      tags:
+      - Conjuntos
+      responses:
+        '204':
+          description: Eliminado
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /wear-logs:
+    get:
+      operationId: listWearLogs
+      summary: Listar registos de uso
+      description: '**Usado por:** Planner PAPI (HIS-02), Recommendation Service (SUG-01: evitar repetidos).'
+      tags:
+      - Histórico
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-16'
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-22'
+      responses:
+        '200':
+          description: Registos por data
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RegistoUso'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+    post:
+      operationId: createWearLog
+      summary: Gravar registo de uso
+      description: '**Usado por:** Planner PAPI (HIS-01, SUG-08). RegistoUso + RegistoUsoPeca.'
+      tags:
+      - Histórico
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistoUsoCriarRegisto'
+      responses:
+        '201':
+          description: Criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistoUso'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /wear-logs/{idRegistoUso}:
+    parameters:
+    - name: idRegistoUso
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 130
+    - $ref: '#/components/parameters/IdUtilizador'
+    delete:
+      operationId: deleteWearLog
+      summary: Apagar registo de uso
+      description: '**Usado por:** Planner PAPI (HIS-04). DELETE ... WHERE idRegistoUso = ? AND idUtilizador = ?; se não apagar
+        nenhuma linha, responde 404. As RegistoUsoPeca saem pelo ON DELETE CASCADE.'
+      tags:
+      - Histórico
+      responses:
+        '204':
+          description: Eliminado
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /wear-logs/aggregates:
+    get:
+      operationId: getWearAggregates
+      summary: Peças mais e menos usadas
+      description: '**Usado por:** Planner PAPI (HIS-03, WDB-03). Conta em RegistoUsoPeca.'
+      tags:
+      - Histórico
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-10-20'
+      - name: idPeca
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          example: 42
+      responses:
+        '200':
+          description: Agregados
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgregadoUso'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+  /calendar-events:
+    get:
+      operationId: listCalendarEvents
+      summary: Listar eventos
+      description: '**Usado por:** Planner PAPI (CAL-01, SUG-01).'
+      tags:
+      - Calendário
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      - name: month
+        in: query
+        required: false
+        schema:
+          type: string
+          example: 2026-12
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-19'
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 50
+      responses:
+        '200':
+          description: Eventos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+    post:
+      operationId: createCalendarEvent
+      summary: Gravar evento
+      description: '**Usado por:** Planner PAPI (CAL-02).'
+      tags:
+      - Calendário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoCriarRegisto'
+      responses:
+        '201':
+          description: Criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /calendar-events/{idEvento}:
+    parameters:
+    - name: idEvento
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 15
+    - $ref: '#/components/parameters/IdUtilizador'
+    patch:
+      operationId: updateCalendarEvent
+      summary: Alterar evento
+      description: '**Usado por:** Planner PAPI (CAL-03). idConjunto = null tira o conjunto.'
+      tags:
+      - Calendário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoAlterar'
+      responses:
+        '200':
+          description: Atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteCalendarEvent
+      summary: Eliminar evento
+      description: '**Usado por:** Planner PAPI (CAL-04).'
+      tags:
+      - Calendário
+      responses:
+        '204':
+          description: Eliminado
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+components:
+  securitySchemes:
+    chaveInterna:
+      type: apiKey
+      in: header
+      name: X-Internal-Api-Key
+      description: Chave partilhada entre serviços na rede privada. Só a EAPI é pública.
+  schemas:
+    EventoAlterar:
+      type: object
+      properties:
+        titulo:
+          type: string
+          example: Jantar de curso
+          minLength: 1
+          maxLength: 45
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-13'
+        horaInicio:
+          type:
+          - string
+          - 'null'
+          example: '21:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type:
+          - string
+          - 'null'
+          example: Lagoa
+          maxLength: 100
+        nota:
+          type:
+          - string
+          - 'null'
+          maxLength: 255
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+          description: null tira o conjunto do evento
+      minProperties: 1
+    FicheiroImagem:
+      type: object
+      properties:
+        ficheiro:
+          type: string
+          format: binary
+          description: JPEG, PNG ou WebP, até 5 MB
+      required:
+      - ficheiro
+    Foto:
+      type: object
+      properties:
+        foto:
+          type: string
+          example: pecas/7/2b1f0c.jpg
+          description: Caminho no bucket, a enviar em POST /pieces
+        url:
+          type: string
+          format: uri
+          example: https://storage.exemplo/pecas/7/2b1f0c.jpg?assinatura=…
+      required:
+      - foto
+      - url
+    Catalogo:
+      type: object
+      properties:
+        categorias:
+          type: array
+          items:
+            $ref: '#/components/schemas/Categoria'
+        estacoes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+        estilos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estilo'
+        etiquetasMeteo:
+          type: array
+          items:
+            $ref: '#/components/schemas/EtiquetaMeteorologica'
+      required:
+      - categorias
+      - estacoes
+      - estilos
+      - etiquetasMeteo
+    Categoria:
+      type: object
+      properties:
+        idCategoria:
+          type: integer
+          minimum: 1
+          example: 3
+        nome:
+          type: string
+          example: Casacos
+      required:
+      - idCategoria
+      - nome
+    Estacao:
+      type: string
+      enum:
+      - primavera
+      - verao
+      - outono
+      - inverno
+      example: outono
+    Estilo:
+      type: string
+      enum:
+      - casual
+      - minimalista
+      - classico
+      - elegante
+      - desportivo
+      - streetwear
+      - boho
+      example: casual
+    EtiquetaMeteorologica:
+      type: object
+      properties:
+        idEtiquetaMeteorologica:
+          type: integer
+          minimum: 1
+          example: 2
+        codigo:
+          type: string
+          example: chuva
+        nomeApresentado:
+          type: string
+          example: Chuva
+        grupo:
+          type: string
+          enum:
+          - temperatura
+          - condicao
+          example: condicao
+      required:
+      - idEtiquetaMeteorologica
+      - codigo
+      - nomeApresentado
+      - grupo
+    Erro:
+      type: object
+      properties:
+        codigo:
+          type: string
+          example: NAO_ENCONTRADO
+        mensagem:
+          type: string
+          example: Recurso não encontrado.
+        campos:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+                example: nome
+              erro:
+                type: string
+                example: máximo 45 caracteres
+          description: Só nos erros de validação (422)
+      required:
+      - codigo
+      - mensagem
+    PecaRegisto:
+      allOf:
+      - $ref: '#/components/schemas/Peca'
+      - type: object
+        properties:
+          idUtilizador:
+            type: integer
+            minimum: 1
+            example: 7
+          foto:
+            type: string
+            example: pecas/7/42.jpg
+          eliminadaData:
+            type:
+            - string
+            - 'null'
+            format: date-time
+            example: '2026-11-18T12:00:00Z'
+        required:
+        - idUtilizador
+        - foto
+        - eliminadaData
+    PecaCriarRegisto:
+      allOf:
+      - $ref: '#/components/schemas/PecaCriar'
+      - type: object
+        properties:
+          idUtilizador:
+            type: integer
+            minimum: 1
+            example: 7
+        required:
+        - idUtilizador
+    PecaAlterarRegisto:
+      allOf:
+      - $ref: '#/components/schemas/PecaAlterar'
+      - type: object
+        properties:
+          favorita:
+            type: boolean
+            example: true
+          eliminadaData:
+            type:
+            - string
+            - 'null'
+            format: date-time
+            example: '2026-11-18T12:00:00Z'
+    ConjuntoRegisto:
+      allOf:
+      - $ref: '#/components/schemas/Conjunto'
+      - type: object
+        properties:
+          idUtilizador:
+            type: integer
+            minimum: 1
+            example: 7
+        required:
+        - idUtilizador
+    ConjuntoCriarRegisto:
+      allOf:
+      - $ref: '#/components/schemas/ConjuntoCriar'
+      - type: object
+        properties:
+          idUtilizador:
+            type: integer
+            minimum: 1
+            example: 7
+        required:
+        - idUtilizador
+    ConjuntoAlterarRegisto:
+      allOf:
+      - $ref: '#/components/schemas/ConjuntoAlterar'
+      - type: object
+        properties:
+          conjuntoFavorito:
+            type: boolean
+            example: true
+    RegistoUsoCriarRegisto:
+      type: object
+      properties:
+        idUtilizador:
+          type: integer
+          minimum: 1
+          example: 7
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+        dataUso:
+          type: string
+          format: date
+          example: '2026-11-19'
+        nomeConjunto:
+          type: string
+          example: Ida à faculdade
+          maxLength: 45
+        origem:
+          type: string
+          enum:
+          - sugestao
+          - manual
+          - evento
+          example: manual
+        condicaoMeteo:
+          type:
+          - string
+          - 'null'
+          example: chuva
+        temperatura:
+          type:
+          - number
+          - 'null'
+          example: 17.5
+        pecas:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 42
+          minItems: 1
+          uniqueItems: true
+      required:
+      - idUtilizador
+      - dataUso
+      - nomeConjunto
+      - origem
+      - pecas
+    EventoCriarRegisto:
+      allOf:
+      - $ref: '#/components/schemas/EventoCriar'
+      - type: object
+        properties:
+          idUtilizador:
+            type: integer
+            minimum: 1
+            example: 7
+        required:
+        - idUtilizador
+    ContadoresUtilizador:
+      type: object
+      properties:
+        pecas:
+          type: integer
+          example: 34
+        conjuntos:
+          type: integer
+          example: 9
+        usos:
+          type: integer
+          example: 51
+        favoritos:
+          $ref: '#/components/schemas/ResumoFavoritos'
+      required:
+      - pecas
+      - conjuntos
+      - usos
+      - favoritos
+    AgregadoUso:
+      type: object
+      properties:
+        maisUsadas:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsoPeca'
+        menosUsadas:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsoPeca'
+      required:
+      - maisUsadas
+      - menosUsadas
+    ExportacaoGuardaRoupa:
+      type: object
+      properties:
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Peca'
+        conjuntos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Conjunto'
+        historico:
+          type: array
+          items:
+            $ref: '#/components/schemas/RegistoUso'
+        eventos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evento'
+      required:
+      - pecas
+      - conjuntos
+      - historico
+      - eventos
+    Peca:
+      allOf:
+      - $ref: '#/components/schemas/PecaResumo'
+      - type: object
+        properties:
+          fotoUrl:
+            type: string
+            format: uri
+            example: https://storage.exemplo/pecas/7/42.jpg?assinatura=…
+          estadoFoto:
+            type: string
+            enum:
+            - pendente
+            - processada
+            - falhou
+            example: processada
+          etiquetasMeteo:
+            type: array
+            items:
+              $ref: '#/components/schemas/EtiquetaMeteorologica'
+          dataCriado:
+            type: string
+            format: date-time
+            example: '2026-11-02T18:20:00Z'
+          usos:
+            type: integer
+            minimum: 0
+            example: 5
+            description: Vezes que a peça foi usada (RegistoUsoPeca)
+        required:
+        - fotoUrl
+        - estadoFoto
+        - etiquetasMeteo
+        - dataCriado
+    PecaResumo:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        nome:
+          type: string
+          example: Casaco impermeável
+        categoria:
+          $ref: '#/components/schemas/Categoria'
+        estacao:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+        corNome:
+          type: string
+          example: azul-marinho
+        corCodigo:
+          type: string
+          example: '#1E3A8A'
+          pattern: ^#[0-9A-Fa-f]{6}$
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+        favorita:
+          type: boolean
+          example: true
+      required:
+      - idPeca
+      - nome
+      - categoria
+      - estacao
+      - corNome
+      - corCodigo
+      - favorita
+    PecaCriar:
+      type: object
+      properties:
+        foto:
+          type: string
+          example: pecas/7/2b1f0c.jpg
+          description: Caminho devolvido por POST /photos (ADD-01)
+        nome:
+          type: string
+          example: Casaco impermeável
+          minLength: 1
+          maxLength: 45
+        idCategoria:
+          type: integer
+          minimum: 1
+          example: 3
+        estacao:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+          minItems: 1
+          uniqueItems: true
+        corNome:
+          type: string
+          example: azul-marinho
+          maxLength: 45
+        corCodigo:
+          type: string
+          example: '#1E3A8A'
+          pattern: ^#[0-9A-Fa-f]{6}$
+        etiquetasMeteo:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 2
+          uniqueItems: true
+          description: idEtiquetaMeteorologica; pode ir vazia
+      required:
+      - foto
+      - nome
+      - idCategoria
+      - estacao
+      - corNome
+      - corCodigo
+    PecaAlterar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Casaco de chuva
+          minLength: 1
+          maxLength: 45
+        idCategoria:
+          type: integer
+          minimum: 1
+          example: 3
+        estacao:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+          minItems: 1
+          uniqueItems: true
+        corNome:
+          type: string
+          example: preto
+          maxLength: 45
+        corCodigo:
+          type: string
+          example: '#000000'
+          pattern: ^#[0-9A-Fa-f]{6}$
+        etiquetasMeteo:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 2
+          uniqueItems: true
+        foto:
+          type: string
+          example: pecas/7/9a7e11.jpg
+          description: Nova foto carregada em POST /photos
+      minProperties: 1
+    Conjunto:
+      type: object
+      properties:
+        idConjunto:
+          type: integer
+          minimum: 1
+          example: 9
+        nome:
+          type: string
+          example: Ida à faculdade
+        codigoEstilo:
+          oneOf:
+          - $ref: '#/components/schemas/Estilo'
+          - type: 'null'
+        conjuntoFavorito:
+          type: boolean
+          example: false
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PecaNoConjunto'
+        usos:
+          type: integer
+          minimum: 0
+          example: 3
+      required:
+      - idConjunto
+      - nome
+      - codigoEstilo
+      - conjuntoFavorito
+      - pecas
+      - usos
+    PecaNoConjunto:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+        eliminada:
+          type: boolean
+          example: false
+      required:
+      - idPeca
+      - eliminada
+    ConjuntoCriar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Ida à faculdade
+          minLength: 1
+          maxLength: 45
+        codigoEstilo:
+          $ref: '#/components/schemas/Estilo'
+        pecas:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 42
+          minItems: 2
+          uniqueItems: true
+          description: idPeca; 2 ou mais, sem peças eliminadas
+      required:
+      - nome
+      - pecas
+    ConjuntoAlterar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Ida à faculdade (inverno)
+          minLength: 1
+          maxLength: 45
+        codigoEstilo:
+          oneOf:
+          - $ref: '#/components/schemas/Estilo'
+          - type: 'null'
+        pecas:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 42
+          minItems: 2
+          uniqueItems: true
+      minProperties: 1
+    EventoCriar:
+      type: object
+      properties:
+        titulo:
+          type: string
+          example: Jantar de curso
+          minLength: 1
+          maxLength: 45
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-12'
+        horaInicio:
+          type: string
+          example: '20:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type: string
+          example: Ponta Delgada
+          maxLength: 100
+        nota:
+          type: string
+          example: Levar casaco
+          maxLength: 255
+        idConjunto:
+          type: integer
+          minimum: 1
+          example: 9
+      required:
+      - titulo
+      - dataEvento
+    ResumoFavoritos:
+      type: object
+      properties:
+        pecas:
+          type: integer
+          example: 6
+        conjuntos:
+          type: integer
+          example: 2
+      required:
+      - pecas
+      - conjuntos
+    UsoPeca:
+      type: object
+      properties:
+        peca:
+          $ref: '#/components/schemas/PecaSugerida'
+        vezes:
+          type: integer
+          minimum: 0
+          example: 8
+      required:
+      - peca
+      - vezes
+    PecaSugerida:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        nome:
+          type: string
+          example: Casaco impermeável
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+      required:
+      - idPeca
+      - nome
+    Evento:
+      type: object
+      properties:
+        idEvento:
+          type: integer
+          minimum: 1
+          example: 15
+        titulo:
+          type: string
+          example: Jantar de curso
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-12'
+        horaInicio:
+          type:
+          - string
+          - 'null'
+          example: '20:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+        nota:
+          type:
+          - string
+          - 'null'
+          example: Levar casaco
+        conjunto:
+          type:
+          - object
+          - 'null'
+          properties:
+            idConjunto:
+              type: integer
+              minimum: 1
+              example: 9
+            nome:
+              type: string
+              example: Ida à faculdade
+          required:
+          - idConjunto
+          - nome
+      required:
+      - idEvento
+      - titulo
+      - dataEvento
+    RegistoUso:
+      type: object
+      properties:
+        idRegistoUso:
+          type: integer
+          minimum: 1
+          example: 130
+        dataUso:
+          type: string
+          format: date
+          example: '2026-11-19'
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+        nomeConjunto:
+          type: string
+          example: Ida à faculdade
+        origem:
+          type: string
+          enum:
+          - sugestao
+          - manual
+          - evento
+          example: manual
+        condicaoMeteo:
+          type:
+          - string
+          - 'null'
+          example: chuva
+        temperatura:
+          type:
+          - number
+          - 'null'
+          example: 17.5
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PecaNoConjunto'
+      required:
+      - idRegistoUso
+      - dataUso
+      - nomeConjunto
+      - origem
+      - pecas
+  responses:
+    NaoEncontrado:
+      description: Não existe ou não pertence ao utilizador (404 em vez de 403, NFR-05)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_ENCONTRADO
+            mensagem: Recurso não encontrado.
+    Validacao:
+      description: Dados inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: VALIDACAO
+            mensagem: Há campos inválidos.
+            campos:
+            - campo: nome
+              erro: máximo 45 caracteres
+    ChaveInterna:
+      description: Falta ou é inválida a chave interna (X-Internal-Api-Key)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_AUTORIZADO
+            mensagem: Chave interna inválida.
+  parameters:
+    IdUtilizador:
+      name: idUtilizador
+      in: query
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 7
+      description: Dono dos dados (vem da PAPI, que o recebeu da EAPI)

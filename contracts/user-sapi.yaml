@@ -1,0 +1,464 @@
+openapi: 3.1.0
+info:
+  title: Digital Wardrobe — User SAPI (System API)
+  version: 2.0.0
+  description: |-
+    System API dos dados do utilizador em `dw_principal`: Utilizador, PreferenciaUtilizador e EstiloUtilizador.
+
+    A identidade é gerida pelo Auth0: esta API não guarda passwords nem tokens. Cada Utilizador está ligado à conta do Auth0 pelo `authSub` (o `sub` do token).
+
+    - **Consumidor:** só a Account PAPI.
+    - **Eventos:** nenhum (quem publica é a Account PAPI).
+
+    IDs inteiros e nomes de campos iguais às colunas da base de dados. Erros no formato `Erro`. Todos os pedidos levam `X-Internal-Api-Key`.
+servers:
+- url: http://user-sapi.internal:3001/api/v1
+  description: Rede privada (não acessível da internet)
+- url: http://localhost:3001/api/v1
+  description: Desenvolvimento local
+security:
+- chaveInterna: []
+tags:
+- name: Utilizadores
+- name: Preferências
+paths:
+  /users:
+    get:
+      operationId: findUserByAuthSub
+      summary: Procurar utilizador pelo authSub
+      description: '**Usado por:** Account PAPI (ACC-01: saber se a conta do Auth0 já tem Utilizador).'
+      tags:
+      - Utilizadores
+      parameters:
+      - name: authSub
+        in: query
+        required: true
+        schema:
+          type: string
+          example: google-oauth2|10769150350006150715113
+          maxLength: 255
+      responses:
+        '200':
+          description: Utilizador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UtilizadorRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    post:
+      operationId: createUser
+      summary: Criar utilizador
+      description: |-
+        **Usado por:** Account PAPI (ACC-01, primeiro pedido de uma conta do Auth0).
+
+        Cria também a linha de PreferenciaUtilizador com os valores por omissão.
+      tags:
+      - Utilizadores
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UtilizadorCriar'
+      responses:
+        '201':
+          description: Criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UtilizadorRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '409':
+          description: Já existe um Utilizador com este authSub ou com este email
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: EMAIL_JA_REGISTADO
+                mensagem: Já existe uma conta com este email
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /users/{idUtilizador}:
+    parameters:
+    - name: idUtilizador
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 7
+    get:
+      operationId: getUser
+      summary: Obter utilizador
+      description: '**Usado por:** Account PAPI (ACC-04, PER-07, PER-08).'
+      tags:
+      - Utilizadores
+      responses:
+        '200':
+          description: Utilizador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UtilizadorRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    patch:
+      operationId: updateUser
+      summary: Alterar utilizador
+      description: '**Usado por:** Account PAPI (PER-01 nome, PER-02 fotoPerfil). O email vem do Auth0 e não se altera aqui.'
+      tags:
+      - Utilizadores
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UtilizadorAlterar'
+      responses:
+        '200':
+          description: Atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UtilizadorRegisto'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteUser
+      summary: Eliminar utilizador
+      description: |-
+        **Usado por:** Account PAPI (PER-08).
+
+        O ON DELETE CASCADE de dw_principal apaga preferências, estilos, peças, conjuntos, histórico e eventos.
+      tags:
+      - Utilizadores
+      responses:
+        '204':
+          description: Eliminado
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /users/{idUtilizador}/preferences:
+    parameters:
+    - name: idUtilizador
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 7
+    get:
+      operationId: getPreferences
+      summary: Obter preferências
+      description: '**Usado por:** Account PAPI (PER-04, SUG-01). PreferenciaUtilizador + EstiloUtilizador.'
+      tags:
+      - Preferências
+      responses:
+        '200':
+          description: Preferências
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasUtilizador'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    put:
+      operationId: replaceStylePreferences
+      summary: Substituir as preferências de estilo
+      description: '**Usado por:** Account PAPI (PER-05). Substitui as linhas de EstiloUtilizador.'
+      tags:
+      - Preferências
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreferenciasEstilo'
+      responses:
+        '200':
+          description: Guardadas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasEstilo'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    patch:
+      operationId: updatePreferences
+      summary: Alterar localização ou notificações
+      description: '**Usado por:** Account PAPI (SUG-05 localização, PER-06 notificações).'
+      tags:
+      - Preferências
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreferenciasAlterar'
+      responses:
+        '200':
+          description: Atualizadas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasUtilizador'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+components:
+  securitySchemes:
+    chaveInterna:
+      type: apiKey
+      in: header
+      name: X-Internal-Api-Key
+      description: Chave partilhada entre serviços na rede privada. Só a EAPI é pública.
+  schemas:
+    Notificacoes:
+      type: object
+      properties:
+        notificacoesAtivas:
+          type: boolean
+          example: true
+      required:
+      - notificacoesAtivas
+    Localizacao:
+      type: object
+      properties:
+        localizacaoAtiva:
+          type: boolean
+          example: false
+          description: true = usar o GPS; false = usar a cidade escolhida
+        cidade:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+          maxLength: 45
+        latitude:
+          type:
+          - number
+          - 'null'
+          example: 37.74
+          minimum: -90
+          maximum: 90
+          description: Arredondada a 2 casas decimais (NFR-05)
+        longitude:
+          type:
+          - number
+          - 'null'
+          example: -25.67
+          minimum: -180
+          maximum: 180
+      required:
+      - localizacaoAtiva
+    PreferenciasEstilo:
+      type: object
+      properties:
+        estilos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estilo'
+          maxItems: 3
+          uniqueItems: true
+          example:
+          - casual
+          - minimalista
+        priorizarFavorito:
+          type: boolean
+          example: true
+        evitarRepeticao:
+          type: boolean
+          example: true
+        aprenderComUso:
+          type: boolean
+          example: true
+      required:
+      - estilos
+      - priorizarFavorito
+      - evitarRepeticao
+      - aprenderComUso
+    Estilo:
+      type: string
+      enum:
+      - casual
+      - minimalista
+      - classico
+      - elegante
+      - desportivo
+      - streetwear
+      - boho
+      example: casual
+    PreferenciasUtilizador:
+      allOf:
+      - $ref: '#/components/schemas/PreferenciasEstilo'
+      - $ref: '#/components/schemas/Localizacao'
+      - $ref: '#/components/schemas/Notificacoes'
+    Erro:
+      type: object
+      properties:
+        codigo:
+          type: string
+          example: NAO_ENCONTRADO
+        mensagem:
+          type: string
+          example: Recurso não encontrado.
+        campos:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+                example: nome
+              erro:
+                type: string
+                example: máximo 45 caracteres
+          description: Só nos erros de validação (422)
+      required:
+      - codigo
+      - mensagem
+    UtilizadorRegisto:
+      type: object
+      properties:
+        idUtilizador:
+          type: integer
+          minimum: 1
+          example: 7
+        authSub:
+          type: string
+          example: google-oauth2|10769150350006150715113
+          description: sub do Auth0 (identificador da conta no fornecedor de identidade)
+        nome:
+          type: string
+          example: Sara Freire
+        email:
+          type: string
+          example: sara@exemplo.pt
+          format: email
+        fotoPerfil:
+          type:
+          - string
+          - 'null'
+          example: avatares/7.jpg
+        dataCriado:
+          type: string
+          format: date-time
+          example: '2026-10-01T10:00:00Z'
+      required:
+      - idUtilizador
+      - authSub
+      - nome
+      - email
+      - dataCriado
+    UtilizadorCriar:
+      type: object
+      properties:
+        authSub:
+          type: string
+          example: google-oauth2|10769150350006150715113
+          maxLength: 255
+        nome:
+          type: string
+          example: Sara Freire
+          maxLength: 45
+        email:
+          type: string
+          example: sara@exemplo.pt
+          format: email
+          maxLength: 255
+      required:
+      - authSub
+      - nome
+      - email
+    UtilizadorAlterar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Sara F.
+          maxLength: 45
+        fotoPerfil:
+          type:
+          - string
+          - 'null'
+          example: avatares/7.jpg
+          maxLength: 255
+      minProperties: 1
+    PreferenciasAlterar:
+      type: object
+      properties:
+        localizacaoAtiva:
+          type: boolean
+          example: false
+        cidade:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+          maxLength: 45
+        latitude:
+          type:
+          - number
+          - 'null'
+          example: 37.74
+        longitude:
+          type:
+          - number
+          - 'null'
+          example: -25.67
+        notificacoesAtivas:
+          type: boolean
+          example: true
+      minProperties: 1
+  responses:
+    NaoEncontrado:
+      description: Não existe ou não pertence ao utilizador (404 em vez de 403, NFR-05)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_ENCONTRADO
+            mensagem: Recurso não encontrado.
+    Validacao:
+      description: Dados inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: VALIDACAO
+            mensagem: Há campos inválidos.
+            campos:
+            - campo: nome
+              erro: máximo 45 caracteres
+    ChaveInterna:
+      description: Falta ou é inválida a chave interna (X-Internal-Api-Key)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_AUTORIZADO
+            mensagem: Chave interna inválida.

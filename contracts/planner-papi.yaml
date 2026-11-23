@@ -1,0 +1,668 @@
+openapi: 3.1.0
+info:
+  title: Digital Wardrobe — Planner PAPI (Process API)
+  version: 1.0.1
+  description: |-
+    Process API do histórico de uso («Wear this», «Log outfit»), das estatísticas e do calendário de eventos.
+
+    - **Consumidor:** só a EAPI, que envia o utilizador autenticado em `X-User-Id`.
+    - **Dependências:** Wardrobe SAPI, Weather SAPI (tempo do dia), Recommendation Service (ler a sugestão aceite).
+    - **Publica:** `planner.outfit.worn`, `planner.wearlog.deleted`, `planner.plan.changed`.
+
+    IDs inteiros e nomes de campos iguais às colunas da base de dados. Erros no formato `Erro`. Todos os pedidos levam `X-Internal-Api-Key`.
+servers:
+- url: http://planner-papi.internal:3005/api/v1
+  description: Rede privada (não acessível da internet)
+- url: http://localhost:3005/api/v1
+  description: Desenvolvimento local
+security:
+- chaveInterna: []
+tags:
+- name: Histórico
+- name: Calendário
+paths:
+  /wear-logs:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    get:
+      operationId: listWearLogs
+      summary: Consultar o histórico
+      description: |-
+        **Usado por:** EAPI (HIS-02).
+
+        Semana atual por omissão; máximo 92 dias. **Chama:** Wardrobe SAPI GET /wear-logs.
+      tags:
+      - Histórico
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-16'
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-22'
+      responses:
+        '200':
+          description: Registos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RegistoUso'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    post:
+      operationId: createWearLog
+      summary: Registar conjunto usado
+      description: |-
+        **Usado por:** EAPI (HIS-01).
+
+        Data não futura. **Chama:** Wardrobe SAPI GET /outfits/{idConjunto} (posse, nome, peças), Weather SAPI GET /forecast (se for hoje), Wardrobe SAPI POST /wear-logs (origem = manual).
+
+        **Publica:** `planner.outfit.worn`.
+      tags:
+      - Histórico
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistoUsoCriar'
+      responses:
+        '201':
+          description: Criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistoCriado'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /wear-logs/{idRegistoUso}:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    - name: idRegistoUso
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 130
+    delete:
+      operationId: deleteWearLog
+      summary: Anular um registo de uso
+      description: |-
+        **Usado por:** EAPI (HIS-04).
+
+        Qualquer origem (manual, sugestao, evento) e qualquer data. Não mexe no estado da sugestão: uma sugestão aceite continua aceite. **Chama:** Wardrobe SAPI DELETE /wear-logs/{idRegistoUso} (que só apaga se o registo for do utilizador; senão 404).
+
+        **Publica:** `planner.wearlog.deleted` (idRegistoUso, idUtilizador); o Recommendation Service já o recebe por `planner.#` e recalcula.
+      tags:
+      - Histórico
+      responses:
+        '204':
+          description: Eliminado
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /wear-logs/stats:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    get:
+      operationId: getWearStats
+      summary: Peças mais e menos usadas
+      description: |-
+        **Usado por:** EAPI (HIS-03, WDB-03 com idPeca).
+
+        **Chama:** Wardrobe SAPI GET /wear-logs/aggregates.
+      tags:
+      - Histórico
+      parameters:
+      - name: periodo
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - 30d
+          - 90d
+          default: 30d
+      - name: idPeca
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          example: 42
+      responses:
+        '200':
+          description: Estatísticas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Estatisticas'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /suggestions/{idSugestao}/accept:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    - name: idSugestao
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 88
+    post:
+      operationId: acceptSuggestion
+      summary: Aceitar a sugestão («Wear this»)
+      description: |-
+        **Usado por:** EAPI (SUG-08).
+
+        **Chama:** Recommendation Service GET /recommendations/{idSugestao}, Wardrobe SAPI POST /wear-logs (origem = sugestao).
+
+        **Publica:** `planner.outfit.worn` com idSugestao; o Recommendation Service põe a sugestão em estado = aceite.
+      tags:
+      - Histórico
+      responses:
+        '201':
+          description: Uso registado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistoCriado'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '409':
+          description: A sugestão já foi aceite ou trocada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SUGESTAO_FECHADA
+                mensagem: A sugestão já foi aceite ou trocada
+  /calendar-events:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    get:
+      operationId: listCalendarEvents
+      summary: Listar eventos
+      description: |-
+        **Usado por:** EAPI (CAL-01, SUG-01 com from + limit).
+
+        **Chama:** Wardrobe SAPI GET /calendar-events.
+      tags:
+      - Calendário
+      parameters:
+      - name: month
+        in: query
+        required: false
+        schema:
+          type: string
+          example: 2026-12
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-19'
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 50
+      responses:
+        '200':
+          description: Eventos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    post:
+      operationId: createCalendarEvent
+      summary: Criar evento
+      description: |-
+        **Usado por:** EAPI (CAL-02).
+
+        Data não pode estar no passado. **Chama:** Wardrobe SAPI GET /outfits/{idConjunto} (se vier), POST /calendar-events.
+
+        **Publica:** `planner.plan.changed` (criado).
+      tags:
+      - Calendário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoCriar'
+      responses:
+        '201':
+          description: Criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /calendar-events/{idEvento}:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    - name: idEvento
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 15
+    patch:
+      operationId: updateCalendarEvent
+      summary: Editar evento
+      description: |-
+        **Usado por:** EAPI (CAL-03).
+
+        **Chama:** Wardrobe SAPI GET /outfits/{idConjunto} (se mudar), PATCH /calendar-events/{idEvento}.
+
+        **Publica:** `planner.plan.changed` (alterado).
+      tags:
+      - Calendário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoAlterar'
+      responses:
+        '200':
+          description: Atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteCalendarEvent
+      summary: Eliminar evento
+      description: |-
+        **Usado por:** EAPI (CAL-04).
+
+        **Chama:** Wardrobe SAPI DELETE /calendar-events/{idEvento}.
+
+        **Publica:** `planner.plan.changed` (eliminado).
+      tags:
+      - Calendário
+      responses:
+        '204':
+          description: Eliminado
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+components:
+  securitySchemes:
+    chaveInterna:
+      type: apiKey
+      in: header
+      name: X-Internal-Api-Key
+      description: Chave partilhada entre serviços na rede privada. Só a EAPI é pública.
+  schemas:
+    EventoAlterar:
+      type: object
+      properties:
+        titulo:
+          type: string
+          example: Jantar de curso
+          minLength: 1
+          maxLength: 45
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-13'
+        horaInicio:
+          type:
+          - string
+          - 'null'
+          example: '21:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type:
+          - string
+          - 'null'
+          example: Lagoa
+          maxLength: 100
+        nota:
+          type:
+          - string
+          - 'null'
+          maxLength: 255
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+          description: null tira o conjunto do evento
+      minProperties: 1
+    EventoCriar:
+      type: object
+      properties:
+        titulo:
+          type: string
+          example: Jantar de curso
+          minLength: 1
+          maxLength: 45
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-12'
+        horaInicio:
+          type: string
+          example: '20:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type: string
+          example: Ponta Delgada
+          maxLength: 100
+        nota:
+          type: string
+          example: Levar casaco
+          maxLength: 255
+        idConjunto:
+          type: integer
+          minimum: 1
+          example: 9
+      required:
+      - titulo
+      - dataEvento
+    Evento:
+      type: object
+      properties:
+        idEvento:
+          type: integer
+          minimum: 1
+          example: 15
+        titulo:
+          type: string
+          example: Jantar de curso
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-12'
+        horaInicio:
+          type:
+          - string
+          - 'null'
+          example: '20:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+        nota:
+          type:
+          - string
+          - 'null'
+          example: Levar casaco
+        conjunto:
+          type:
+          - object
+          - 'null'
+          properties:
+            idConjunto:
+              type: integer
+              minimum: 1
+              example: 9
+            nome:
+              type: string
+              example: Ida à faculdade
+          required:
+          - idConjunto
+          - nome
+      required:
+      - idEvento
+      - titulo
+      - dataEvento
+    Estatisticas:
+      type: object
+      properties:
+        periodo:
+          type: string
+          enum:
+          - 30d
+          - 90d
+          example: 30d
+        maisUsadas:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsoPeca'
+        menosUsadas:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsoPeca'
+      required:
+      - periodo
+      - maisUsadas
+      - menosUsadas
+    UsoPeca:
+      type: object
+      properties:
+        peca:
+          $ref: '#/components/schemas/PecaSugerida'
+        vezes:
+          type: integer
+          minimum: 0
+          example: 8
+      required:
+      - peca
+      - vezes
+    PecaSugerida:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        nome:
+          type: string
+          example: Casaco impermeável
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+      required:
+      - idPeca
+      - nome
+    RegistoUso:
+      type: object
+      properties:
+        idRegistoUso:
+          type: integer
+          minimum: 1
+          example: 130
+        dataUso:
+          type: string
+          format: date
+          example: '2026-11-19'
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+        nomeConjunto:
+          type: string
+          example: Ida à faculdade
+        origem:
+          type: string
+          enum:
+          - sugestao
+          - manual
+          - evento
+          example: manual
+        condicaoMeteo:
+          type:
+          - string
+          - 'null'
+          example: chuva
+        temperatura:
+          type:
+          - number
+          - 'null'
+          example: 17.5
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PecaNoConjunto'
+      required:
+      - idRegistoUso
+      - dataUso
+      - nomeConjunto
+      - origem
+      - pecas
+    PecaNoConjunto:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+        eliminada:
+          type: boolean
+          example: false
+      required:
+      - idPeca
+      - eliminada
+    Erro:
+      type: object
+      properties:
+        codigo:
+          type: string
+          example: NAO_ENCONTRADO
+        mensagem:
+          type: string
+          example: Recurso não encontrado.
+        campos:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+                example: nome
+              erro:
+                type: string
+                example: máximo 45 caracteres
+          description: Só nos erros de validação (422)
+      required:
+      - codigo
+      - mensagem
+    RegistoUsoCriar:
+      type: object
+      properties:
+        idConjunto:
+          type: integer
+          minimum: 1
+          example: 9
+        dataUso:
+          type: string
+          format: date
+          example: '2026-11-19'
+          description: Hoje por omissão; não pode ser futura
+      required:
+      - idConjunto
+    RegistoCriado:
+      type: object
+      properties:
+        idRegistoUso:
+          type: integer
+          minimum: 1
+          example: 130
+      required:
+      - idRegistoUso
+  responses:
+    NaoEncontrado:
+      description: Não existe ou não pertence ao utilizador (404 em vez de 403, NFR-05)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_ENCONTRADO
+            mensagem: Recurso não encontrado.
+    Validacao:
+      description: Dados inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: VALIDACAO
+            mensagem: Há campos inválidos.
+            campos:
+            - campo: nome
+              erro: máximo 45 caracteres
+    ChaveInterna:
+      description: Falta ou é inválida a chave interna (X-Internal-Api-Key)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_AUTORIZADO
+            mensagem: Chave interna inválida.
+  parameters:
+    XUserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: idUtilizador que a EAPI obteve a partir do `sub` do access token do Auth0. Nunca vem do pedido da app.
+      schema:
+        type: integer
+        minimum: 1
+        example: 7

@@ -1,0 +1,339 @@
+openapi: 3.1.0
+info:
+  title: Digital Wardrobe — Recommendation Service (microserviço)
+  version: 1.0.0
+  description: |-
+    Microserviço autónomo que gera a sugestão do dia e o «Shuffle». Tem o seu próprio schema, `dw_reco` (PreferenciaCopia, Sugestao, SugestaoPeca), e recalcula sozinho quando chegam eventos. Se estiver em baixo, o resto da app continua a funcionar.
+
+    - **Consumidores:** EAPI (SUG-01, SUG-02), Planner PAPI (SUG-08).
+    - **Dependências:** Weather SAPI, Wardrobe SAPI.
+    - **Consome:** `user.preferences.updated`, `user.location.updated`, `user.deleted`, `wardrobe.#`, `planner.#`, `weather.#` (com `planner.outfit.worn` põe a sugestão em estado = aceite).
+    - **Publica:** `recommendation.ready` (a EAPI envia-o à app como `suggestion:updated`).
+
+    IDs inteiros e nomes de campos iguais às colunas da base de dados. Erros no formato `Erro`. Todos os pedidos levam `X-Internal-Api-Key`.
+servers:
+- url: http://recommendation-service.internal:3007/api/v1
+  description: Rede privada (não acessível da internet)
+- url: http://localhost:3007/api/v1
+  description: Desenvolvimento local
+security:
+- chaveInterna: []
+tags:
+- name: Sugestões
+paths:
+  /recommendations/today:
+    get:
+      operationId: getToday
+      summary: Tempo e sugestão do dia
+      description: |-
+        **Usado por:** EAPI (SUG-01).
+
+        Devolve a sugestão do dia já calculada ou calcula uma nova (filtra pelo tempo e pontua por estilo, favoritos e uso recente, segundo a cópia das preferências). Se o Open-Meteo falhar, devolve meteorologia = null e a sugestão sem filtro de tempo.
+
+        **Chama:** Weather SAPI GET /forecast, Wardrobe SAPI GET /pieces e /wear-logs.
+      tags:
+      - Sugestões
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      - name: latitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: 37.74
+          minimum: -90
+          maximum: 90
+      - name: longitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: -25.67
+          minimum: -180
+          maximum: 180
+      - name: cidade
+        in: query
+        required: false
+        schema:
+          type: string
+          example: Ponta Delgada
+        description: Alternativa a latitude + longitude
+      responses:
+        '200':
+          description: Tempo e sugestão
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hoje'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          description: Sem localização
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SEM_LOCALIZACAO
+                mensagem: Sem localização
+  /recommendations/shuffle:
+    post:
+      operationId: shuffle
+      summary: Gerar outra sugestão
+      description: |-
+        **Usado por:** EAPI (SUG-02).
+
+        Põe a sugestão anterior em estado = trocada e grava a nova (Sugestao + SugestaoPeca).
+
+        **Chama:** Weather SAPI GET /forecast (cache), Wardrobe SAPI GET /pieces.
+      tags:
+      - Sugestões
+      parameters:
+      - $ref: '#/components/parameters/IdUtilizador'
+      responses:
+        '201':
+          description: Nova sugestão
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sugestao'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '409':
+          description: Não há peças suficientes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SEM_ALTERNATIVAS
+                mensagem: Não há peças suficientes
+  /recommendations/{idSugestao}:
+    parameters:
+    - name: idSugestao
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 88
+    - $ref: '#/components/parameters/IdUtilizador'
+    get:
+      operationId: getRecommendation
+      summary: Obter uma sugestão
+      description: '**Usado por:** Planner PAPI (SUG-08), para registar as peças como usadas.'
+      tags:
+      - Sugestões
+      responses:
+        '200':
+          description: Sugestão
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SugestaoDetalhe'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+components:
+  securitySchemes:
+    chaveInterna:
+      type: apiKey
+      in: header
+      name: X-Internal-Api-Key
+      description: Chave partilhada entre serviços na rede privada. Só a EAPI é pública.
+  schemas:
+    Sugestao:
+      type: object
+      properties:
+        idSugestao:
+          type: integer
+          minimum: 1
+          example: 88
+        dataAlvo:
+          type: string
+          format: date
+          example: '2026-11-19'
+        descricao:
+          type:
+          - string
+          - 'null'
+          example: Casual para dia de chuva
+        motivos:
+          type: array
+          items:
+            type: string
+            example: 'Chuva prevista: peça impermeável'
+          example:
+          - 'Chuva prevista: peça impermeável'
+          - 'Estilo preferido: casual'
+        estado:
+          type: string
+          enum:
+          - proposta
+          - aceite
+          - trocada
+          example: proposta
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PecaSugerida'
+          minItems: 1
+      required:
+      - idSugestao
+      - dataAlvo
+      - motivos
+      - estado
+      - pecas
+    PecaSugerida:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        nome:
+          type: string
+          example: Casaco impermeável
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+      required:
+      - idPeca
+      - nome
+    Meteorologia:
+      type: object
+      properties:
+        temperatura:
+          type: number
+          example: 17.5
+          description: °C
+        estado:
+          type: string
+          example: chuva
+        min:
+          type: number
+          example: 14.0
+        max:
+          type: number
+          example: 19.0
+        chuva:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 70
+          description: Probabilidade de precipitação (%)
+        atualizadoEm:
+          type: string
+          format: date-time
+          example: '2026-11-19T08:00:00Z'
+      required:
+      - temperatura
+      - estado
+      - min
+      - max
+      - chuva
+      - atualizadoEm
+    Erro:
+      type: object
+      properties:
+        codigo:
+          type: string
+          example: NAO_ENCONTRADO
+        mensagem:
+          type: string
+          example: Recurso não encontrado.
+        campos:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+                example: nome
+              erro:
+                type: string
+                example: máximo 45 caracteres
+          description: Só nos erros de validação (422)
+      required:
+      - codigo
+      - mensagem
+    Hoje:
+      type: object
+      properties:
+        meteorologia:
+          oneOf:
+          - $ref: '#/components/schemas/Meteorologia'
+          - type: 'null'
+        sugestao:
+          oneOf:
+          - $ref: '#/components/schemas/Sugestao'
+          - type: 'null'
+      required:
+      - meteorologia
+      - sugestao
+    SugestaoDetalhe:
+      allOf:
+      - $ref: '#/components/schemas/Sugestao'
+      - type: object
+        properties:
+          condicaoMeteo:
+            type:
+            - string
+            - 'null'
+            example: chuva
+          temperatura:
+            type:
+            - number
+            - 'null'
+            example: 17.5
+  responses:
+    NaoEncontrado:
+      description: Não existe ou não pertence ao utilizador (404 em vez de 403, NFR-05)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_ENCONTRADO
+            mensagem: Recurso não encontrado.
+    Validacao:
+      description: Dados inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: VALIDACAO
+            mensagem: Há campos inválidos.
+            campos:
+            - campo: nome
+              erro: máximo 45 caracteres
+    ChaveInterna:
+      description: Falta ou é inválida a chave interna (X-Internal-Api-Key)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_AUTORIZADO
+            mensagem: Chave interna inválida.
+  parameters:
+    IdUtilizador:
+      name: idUtilizador
+      in: query
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 7
+      description: Dono dos dados (vem da PAPI, que o recebeu da EAPI)

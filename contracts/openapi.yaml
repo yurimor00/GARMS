@@ -1,0 +1,2538 @@
+openapi: 3.1.0
+info:
+  title: Digital Wardrobe — Experience API (EAPI)
+  version: 2.0.0
+  description: |-
+    Contrato público da **Experience API (EAPI)** do Digital Wardrobe (Grupo 7, Engenharia de Software, Universidade dos Açores).
+
+    A EAPI é a única porta pública do sistema. Valida o access token do Auth0, aplica rate limiting e encaminha cada pedido para as Process APIs (Account, Wardrobe, Planner), para o Recommendation Service ou, só em leituras sem regras de negócio, diretamente para uma System API. O utilizador é sempre o do token: não há `/users/{id}` na API pública.
+
+    **Autenticação (OAuth 2.0 + OpenID Connect, Auth0)**
+    - O registo, o login, o login social, a recuperação de password e o logout são feitos no Auth0 (Universal Login), não nesta API.
+    - A app obtém um access token (Authorization Code Flow com PKCE, `audience` = API do GARMS) e envia-o em `Authorization: Bearer`.
+    - A EAPI valida o token (RS256, JWKS do tenant, `iss` e `aud`) e converte o `sub` no `idUtilizador` interno. No primeiro pedido de uma conta nova, cria o Utilizador (Account PAPI POST /accounts). A correspondência fica em cache no Redis.
+    - Uma Action pós-login do Auth0 acrescenta ao access token as claims `https://garms/email`, `https://garms/name` e `https://garms/auth_time`.
+
+    **Convenções**
+    - IDs inteiros; nomes dos campos iguais às colunas da base de dados (`dw_principal`, `dw_reco`).
+    - Listas paginadas com `page` e `size`; o total vem no cabeçalho `X-Total-Count`.
+    - Um recurso de outra pessoa responde 404, para não revelar que existe (NFR-05).
+    - Erros no formato `Erro` (`codigo`, `mensagem`, `campos`).
+    - Rate limiting em todos os endpoints (resposta 429 `DemasiadosPedidos`), com contadores partilhados no Redis.
+
+    **Tempo real (SUG-06, fora do âmbito do OpenAPI):** WebSocket em `/ws`, com o access token do Auth0 no handshake (`auth.token`). Cada utilizador fica na sala `user:{idUtilizador}` e recebe `suggestion:updated` e, se tiver notificações ativas, `weather:alert`. A app só recebe; todas as ações são REST. Os eventos do broker estão na folha de endpoints (separador «Eventos e WebSocket»).
+servers:
+- url: https://api.{dominio}/api/v1
+  description: Demo (atrás do Traefik e do Cloudflare Tunnel, só HTTPS)
+  variables:
+    dominio:
+      default: garms.pt
+      description: Domínio registado (a confirmar)
+- url: http://localhost:3000/api/v1
+  description: Desenvolvimento local
+security:
+- auth0: []
+tags:
+- name: Conta
+  description: Episódios 1 e 7 · conta, perfil e preferências (Account PAPI). O registo e o login são feitos no Auth0
+- name: Peças
+  description: Episódios 2 e 3 · guarda-roupa e adicionar peça (Wardrobe PAPI)
+- name: Conjuntos
+  description: Episódio 4 · conjuntos (Wardrobe PAPI)
+- name: Hoje
+  description: Episódio 5 · meteorologia e sugestão (Recommendation Service, Weather SAPI)
+- name: Histórico
+  description: Episódio 6 · registo de uso e estatísticas (Planner PAPI)
+- name: Calendário
+  description: Episódio 6 · eventos (Planner PAPI)
+- name: Webhooks
+  description: Chamadas de sistemas externos
+paths:
+  /me:
+    get:
+      operationId: getMe
+      summary: Carregar a sessão
+      description: |-
+        **ACC-01, ACC-04** · Primeiro pedido da app depois do login no Auth0. Se a conta do Auth0 ainda não tem Utilizador, a EAPI cria-o antes de responder (ACC-01). Devolve nome, foto e contadores para o perfil e a barra lateral.
+
+        **Fluxo:** EAPI → Account PAPI POST /accounts (só se o `sub` não estiver em cache) → EAPI agrega: Account PAPI (dados da conta) + Wardrobe PAPI (contadores).
+
+        **Rastreabilidade:** US12, US13, US14 · UC-01, UC-02, UC-04 · FR-01, NFR-01
+      tags:
+      - Conta
+      responses:
+        '200':
+          description: Conta e contadores
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '409':
+          description: O email do token já pertence a outra conta (outro método de login)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: EMAIL_JA_REGISTADO
+                mensagem: Já existe uma conta com este email. Entre com o método que usou da primeira vez.
+    patch:
+      operationId: updateMe
+      summary: Alterar o nome
+      description: |-
+        **PER-01** · O email é gerido pelo Auth0 e não se altera aqui.
+
+        **Fluxo:** EAPI → Account PAPI → User SAPI.
+
+        **Rastreabilidade:** US14 · UC-04 · FR-01
+      tags:
+      - Conta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContaAlterar'
+            example:
+              nome: Sara F.
+      responses:
+        '200':
+          description: Conta atualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conta'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteMe
+      summary: Eliminar a conta e todos os dados
+      description: |-
+        **PER-08** · Exige um login recente: a app volta a pedir o login ao Auth0 (`prompt=login`) e a EAPI recusa se a claim `https://garms/auth_time` tiver mais de 5 minutos. A conta é apagada no Auth0 e, em dw_principal, o ON DELETE CASCADE apaga peças, conjuntos, histórico, eventos e preferências; pelo evento, a Wardrobe PAPI apaga as fotos e o Recommendation Service limpa o dw_reco.
+
+        **Fluxo:** EAPI → Account PAPI → Auth0 Management API + User SAPI.
+
+        **Rastreabilidade:** US24 · UC-35 · NFR-05 (RGPD)
+
+        **Evento publicado:** `user.deleted`
+      tags:
+      - Conta
+      responses:
+        '204':
+          description: Conta eliminada
+        '401':
+          description: Sem sessão, ou o login não é recente
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: REAUTENTICACAO_NECESSARIA
+                mensagem: Volte a iniciar sessão para confirmar a eliminação da conta.
+        '502':
+          description: O Auth0 não respondeu; nada foi apagado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: AUTH_INDISPONIVEL
+                mensagem: Não foi possível eliminar a conta. Tente daqui a pouco.
+  /me/avatar:
+    put:
+      operationId: updateAvatar
+      summary: Mudar a foto de perfil
+      description: |-
+        **PER-02** · Guarda a imagem no bucket e o caminho em Utilizador.fotoPerfil.
+
+        **Fluxo:** EAPI → Account PAPI → Wardrobe SAPI (bucket) + User SAPI.
+
+        **Rastreabilidade:** US14 · UC-04 · FR-01
+      tags:
+      - Conta
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FicheiroImagem'
+      responses:
+        '200':
+          description: Foto atualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FotoPerfil'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '413':
+          description: Ficheiro maior que 5 MB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FICHEIRO_GRANDE
+                mensagem: Ficheiro maior que 5 MB
+        '415':
+          description: Formato não suportado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FORMATO_INVALIDO
+                mensagem: Formato não suportado
+  /me/location:
+    put:
+      operationId: updateLocation
+      summary: Guardar a localização ou a cidade
+      description: |-
+        **SUG-05** · localizacaoAtiva = true usa o GPS (latitude e longitude obrigatórias); false usa a cidade escolhida. As coordenadas são arredondadas a 2 casas.
+
+        **Fluxo:** EAPI → Account PAPI → User SAPI (PreferenciaUtilizador).
+
+        **Rastreabilidade:** US16 · UC-20 · FR-07, NFR-05
+
+        **Evento publicado:** `user.location.updated`
+      tags:
+      - Hoje
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Localizacao'
+            example:
+              localizacaoAtiva: false
+              cidade: Ponta Delgada
+              latitude: 37.74
+              longitude: -25.67
+      responses:
+        '200':
+          description: Localização guardada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LocalizacaoGuardada'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /me/preferences:
+    get:
+      operationId: getPreferences
+      summary: Ver preferências, localização e notificações
+      description: |-
+        **PER-04** · Também é daqui que o Profile lê a localização e as notificações.
+
+        **Fluxo:** EAPI agrega: Account PAPI (preferências) + Wardrobe PAPI (resumo dos favoritos).
+
+        **Rastreabilidade:** US25 · UC-36 · FR-11
+      tags:
+      - Conta
+      responses:
+        '200':
+          description: Preferências
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasVista'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+    put:
+      operationId: putPreferences
+      summary: Guardar as preferências de estilo
+      description: |-
+        **PER-05** · Até 3 estilos. O Recommendation Service guarda uma cópia (PreferenciaCopia) a partir do evento.
+
+        **Fluxo:** EAPI → Account PAPI → User SAPI (PreferenciaUtilizador + EstiloUtilizador).
+
+        **Rastreabilidade:** US25 · UC-36 · FR-11
+
+        **Evento publicado:** `user.preferences.updated`
+      tags:
+      - Conta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreferenciasEstilo'
+      responses:
+        '200':
+          description: Preferências guardadas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasEstilo'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /me/notifications:
+    put:
+      operationId: updateNotifications
+      summary: Ligar ou desligar as notificações
+      description: |-
+        **PER-06** · Sem notificações ativas a EAPI não envia weather:alert.
+
+        **Fluxo:** EAPI → Account PAPI → User SAPI.
+
+        **Rastreabilidade:** US22 · UC-33 · FR-13
+      tags:
+      - Conta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Notificacoes'
+      responses:
+        '200':
+          description: Definição guardada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notificacoes'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /me/export:
+    get:
+      operationId: exportMyData
+      summary: Descarregar os meus dados
+      description: |-
+        **PER-07** · Ficheiro JSON com tudo o que é da pessoa.
+
+        **Fluxo:** EAPI agrega: Account PAPI + Wardrobe PAPI.
+
+        **Rastreabilidade:** US23 · UC-34 · NFR-05 (RGPD)
+      tags:
+      - Conta
+      responses:
+        '200':
+          description: Exportação
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Exportacao'
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: attachment; filename="digital-wardrobe-7.json"
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+  /catalog:
+    get:
+      operationId: getCatalog
+      summary: Obter as opções fixas
+      description: |-
+        **WDB-02** · Categorias, estações, estilos e etiquetas meteorológicas. As cores são livres (corNome + corCodigo).
+
+        **Fluxo:** EAPI → Wardrobe SAPI (leitura direta: listas iguais para todos, sem regras de negócio).
+
+        **Rastreabilidade:** US01, US04, US25 · UC-08, UC-27, UC-28, UC-36 · FR-02, FR-04, FR-11
+      tags:
+      - Peças
+      responses:
+        '200':
+          description: Catálogo
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Catalogo'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+  /pieces:
+    get:
+      operationId: listPieces
+      summary: Listar, pesquisar e filtrar peças
+      description: |-
+        **WDB-01** · Só peças do próprio e não eliminadas. Devolve miniaturas para carregar em ≤ 2 s (NFR-03).
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US02, US04 · UC-06, UC-08 · FR-03, FR-04, NFR-03
+      tags:
+      - Peças
+      parameters:
+      - name: q
+        in: query
+        required: false
+        schema:
+          type: string
+          example: casaco
+        description: Pesquisa no nome
+      - name: idCategoria
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          example: 3
+      - name: estacao
+        in: query
+        required: false
+        schema:
+          $ref: '#/components/schemas/Estacao'
+      - name: corNome
+        in: query
+        required: false
+        schema:
+          type: string
+          example: azul
+      - name: favorita
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 24
+      responses:
+        '200':
+          description: Página de peças
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PecaResumo'
+                required:
+                - items
+          headers:
+            X-Total-Count:
+              description: Número total de resultados (paginação)
+              schema:
+                type: integer
+                example: 34
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    post:
+      operationId: createPiece
+      summary: Guardar a peça (passo 3 de 3)
+      description: |-
+        **ADD-02** · Usa a foto carregada em POST /photos. A miniatura é gerada depois (estadoFoto = pendente).
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI (Peca + PecaEtiquetaMeteorologica).
+
+        **Rastreabilidade:** US01 · UC-05, UC-27, UC-28 · FR-02, NFR-02
+
+        **Evento publicado:** `wardrobe.piece.changed`
+      tags:
+      - Peças
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PecaCriar'
+      responses:
+        '201':
+          description: Peça criada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PecaCriada'
+          headers:
+            Location:
+              schema:
+                type: string
+                example: /api/v1/pieces/42
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          description: A foto não existe ou não é do utilizador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FOTO_INVALIDA
+                mensagem: A foto não existe ou não é do utilizador
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /pieces/{idPeca}:
+    parameters:
+    - name: idPeca
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 42
+    get:
+      operationId: getPiece
+      summary: Ver o detalhe da peça
+      description: |-
+        **WDB-03** · Inclui quantas vezes foi usada.
+
+        **Fluxo:** EAPI agrega: Wardrobe PAPI (peça) + Planner PAPI (usos).
+
+        **Rastreabilidade:** US02 · UC-07 · FR-03
+      tags:
+      - Peças
+      responses:
+        '200':
+          description: Peça
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Peca'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    patch:
+      operationId: updatePiece
+      summary: Editar a peça
+      description: |-
+        **WDB-04** · Altera só os campos enviados. Trocar a foto volta a pôr estadoFoto = pendente.
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US03 · UC-09 · FR-05
+
+        **Evento publicado:** `wardrobe.piece.changed`
+      tags:
+      - Peças
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PecaAlterar'
+            example:
+              nome: Casaco de chuva
+              estacao:
+              - outono
+              - inverno
+      responses:
+        '200':
+          description: Peça atualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Peca'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deletePiece
+      summary: Eliminar a peça
+      description: |-
+        **WDB-06** · Eliminação lógica (eliminadaData): sai do catálogo e das sugestões; conjuntos e histórico continuam a mostrá-la.
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US03 · UC-10 · FR-05
+
+        **Evento publicado:** `wardrobe.piece.changed`
+      tags:
+      - Peças
+      responses:
+        '204':
+          description: Peça eliminada
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /pieces/{idPeca}/favourite:
+    parameters:
+    - name: idPeca
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 42
+    put:
+      operationId: setPieceFavourite
+      summary: Marcar ou desmarcar a peça como favorita
+      description: |-
+        **WDB-05** · Idempotente.
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US26 · UC-37 · FR-12
+
+        **Evento publicado:** `wardrobe.favourite.changed`
+      tags:
+      - Peças
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Favorita'
+      responses:
+        '200':
+          description: Estado atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Favorita'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /photos:
+    post:
+      operationId: uploadPhoto
+      summary: Carregar a fotografia da peça (passo 1 de 3)
+      description: |-
+        **ADD-01** · Ainda não cria a peça. Fotos não usadas em 24 h são apagadas.
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI (bucket, pasta do utilizador).
+
+        **Rastreabilidade:** US01 · UC-05, UC-26 · FR-02, NFR-05
+      tags:
+      - Peças
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FicheiroImagem'
+      responses:
+        '201':
+          description: Foto guardada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Foto'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '413':
+          description: Ficheiro maior que 5 MB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FICHEIRO_GRANDE
+                mensagem: Ficheiro maior que 5 MB
+        '415':
+          description: Formato não suportado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FORMATO_INVALIDO
+                mensagem: Formato não suportado
+  /outfits:
+    get:
+      operationId: listOutfits
+      summary: Listar e filtrar os conjuntos
+      description: |-
+        **OTF-01** · Cada conjunto mostra as peças que o compõem.
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US08 · UC-12 · FR-06
+      tags:
+      - Conjuntos
+      parameters:
+      - name: codigoEstilo
+        in: query
+        required: false
+        schema:
+          $ref: '#/components/schemas/Estilo'
+      - name: conjuntoFavorito
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          default: 1
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 15
+      responses:
+        '200':
+          description: Página de conjuntos
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Conjunto'
+                required:
+                - items
+          headers:
+            X-Total-Count:
+              description: Número total de resultados (paginação)
+              schema:
+                type: integer
+                example: 34
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    post:
+      operationId: createOutfit
+      summary: Criar conjunto
+      description: |-
+        **OTF-03** · 2 ou mais peças, todas do utilizador e não eliminadas.
+
+        **Fluxo:** EAPI → Wardrobe PAPI (posse) → Wardrobe SAPI (Conjunto + ConjuntoPeca).
+
+        **Rastreabilidade:** US05 · UC-11, UC-29 · FR-06
+
+        **Evento publicado:** `wardrobe.outfit.changed`
+      tags:
+      - Conjuntos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConjuntoCriar'
+            example:
+              nome: Ida à faculdade
+              codigoEstilo: casual
+              pecas:
+              - 12
+              - 18
+              - 31
+      responses:
+        '201':
+          description: Conjunto criado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idConjunto:
+                    type: integer
+                    minimum: 1
+                    example: 9
+                required:
+                - idConjunto
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          description: Uma das peças não é do utilizador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: PECA_INVALIDA
+                mensagem: Uma das peças não é do utilizador
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /outfits/{idConjunto}:
+    parameters:
+    - name: idConjunto
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 9
+    get:
+      operationId: getOutfit
+      summary: Ver um conjunto
+      description: "**OTF-02** · \n\n**Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.\n\n**Rastreabilidade:** US06, US08 ·\
+        \ UC-12, UC-13 · FR-06"
+      tags:
+      - Conjuntos
+      responses:
+        '200':
+          description: Conjunto
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conjunto'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+    patch:
+      operationId: updateOutfit
+      summary: Editar conjunto
+      description: |-
+        **OTF-04** · Altera só os campos enviados.
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US06 · UC-13, UC-29 · FR-06
+
+        **Evento publicado:** `wardrobe.outfit.changed`
+      tags:
+      - Conjuntos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConjuntoAlterar'
+      responses:
+        '200':
+          description: Conjunto atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conjunto'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteOutfit
+      summary: Eliminar conjunto
+      description: |-
+        **OTF-05** · Os eventos ficam sem conjunto e o histórico guarda o nome (ON DELETE SET NULL).
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US07 · UC-14 · FR-06
+
+        **Evento publicado:** `wardrobe.outfit.changed`
+      tags:
+      - Conjuntos
+      responses:
+        '204':
+          description: Conjunto eliminado
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /outfits/{idConjunto}/favourite:
+    parameters:
+    - name: idConjunto
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 9
+    put:
+      operationId: setOutfitFavourite
+      summary: Marcar ou desmarcar o conjunto como favorito
+      description: |-
+        **OTF-06** · Idempotente.
+
+        **Fluxo:** EAPI → Wardrobe PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US27 · UC-38 · FR-12
+
+        **Evento publicado:** `wardrobe.favourite.changed`
+      tags:
+      - Conjuntos
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConjuntoFavorito'
+      responses:
+        '200':
+          description: Estado atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConjuntoFavorito'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /today:
+    get:
+      operationId: getToday
+      summary: Abrir o ecrã Hoje
+      description: |-
+        **SUG-01** · Tempo, sugestão do dia com os motivos e (desktop) os próximos eventos. Sem latitude/longitude nem cidade, usa a localização guardada. Se só a meteorologia falhar, responde 200 com meteorologia = null (ecrã «Weather unavailable»).
+
+        **Fluxo:** EAPI agrega: Account PAPI (localização guardada) + Recommendation Service (→ Weather SAPI, Wardrobe SAPI) + Planner PAPI (próximos eventos).
+
+        **Rastreabilidade:** US15 · UC-18, UC-19 · FR-07, FR-08
+      tags:
+      - Hoje
+      parameters:
+      - name: latitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: 37.74
+          minimum: -90
+          maximum: 90
+      - name: longitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: -25.67
+          minimum: -180
+          maximum: 180
+      - name: cidade
+        in: query
+        required: false
+        schema:
+          type: string
+          example: Ponta Delgada
+      responses:
+        '200':
+          description: Resumo do dia
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Hoje'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          description: Sem localização (nem no pedido nem guardada)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SEM_LOCALIZACAO
+                mensagem: Sem localização (nem no pedido nem guardada)
+        '503':
+          description: Recommendation Service indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SERVICO_INDISPONIVEL
+                mensagem: Recommendation Service indisponível
+  /today/shuffle:
+    post:
+      operationId: shuffleSuggestion
+      summary: Pedir outra sugestão
+      description: |-
+        **SUG-02** · A sugestão anterior passa a estado = trocada. POST porque cada pedido dá um resultado diferente.
+
+        **Fluxo:** EAPI → Recommendation Service (→ Weather SAPI, Wardrobe SAPI).
+
+        **Rastreabilidade:** US15 · UC-31 · FR-08
+      tags:
+      - Hoje
+      responses:
+        '201':
+          description: Nova sugestão
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sugestao'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '409':
+          description: Não há peças suficientes para outra sugestão
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SEM_ALTERNATIVAS
+                mensagem: Não há peças suficientes para outra sugestão
+        '503':
+          description: Recommendation Service indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SERVICO_INDISPONIVEL
+                mensagem: Recommendation Service indisponível
+  /suggestions/{idSugestao}/accept:
+    parameters:
+    - name: idSugestao
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 88
+    post:
+      operationId: acceptSuggestion
+      summary: Aceitar a sugestão («Wear this»)
+      description: |-
+        **SUG-08** · Regista as peças da sugestão como usadas hoje (origem = sugestao). O Recommendation Service consome o evento e põe a sugestão em estado = aceite.
+
+        **Fluxo:** EAPI → Planner PAPI → Recommendation Service (lê a sugestão) + Wardrobe SAPI (RegistoUso + RegistoUsoPeca).
+
+        **Rastreabilidade:** US09, US15 · UC-15 · FR-08, FR-09
+
+        **Evento publicado:** `planner.outfit.worn`
+      tags:
+      - Hoje
+      responses:
+        '201':
+          description: Uso registado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistoCriado'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '409':
+          description: A sugestão já foi aceite ou trocada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SUGESTAO_FECHADA
+                mensagem: A sugestão já foi aceite ou trocada
+  /weather:
+    get:
+      operationId: getWeather
+      summary: Tentar de novo só a meteorologia
+      description: |-
+        **SUG-03** · Botão «Try again» do ecrã «Weather unavailable».
+
+        **Fluxo:** EAPI → Weather SAPI (leitura direta: cache → Open-Meteo).
+
+        **Rastreabilidade:** US15, US16 · UC-18 · FR-07, FR-08
+      tags:
+      - Hoje
+      parameters:
+      - name: latitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: 37.74
+          minimum: -90
+          maximum: 90
+      - name: longitude
+        in: query
+        required: false
+        schema:
+          type: number
+          example: -25.67
+          minimum: -180
+          maximum: 180
+      - name: cidade
+        in: query
+        required: false
+        schema:
+          type: string
+          example: Ponta Delgada
+      responses:
+        '200':
+          description: Previsão
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Meteorologia'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          description: Sem localização
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: SEM_LOCALIZACAO
+                mensagem: Sem localização
+        '503':
+          description: Serviço meteorológico indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: METEO_INDISPONIVEL
+                mensagem: Serviço meteorológico indisponível
+  /locations:
+    get:
+      operationId: searchLocations
+      summary: Procurar uma cidade
+      description: |-
+        **SUG-04** · Ecrã «Location denied» → «Choose city».
+
+        **Fluxo:** EAPI → Weather SAPI (leitura direta: geocoding do Open-Meteo).
+
+        **Rastreabilidade:** US16 · UC-20 · FR-07
+      tags:
+      - Hoje
+      parameters:
+      - name: q
+        in: query
+        required: true
+        schema:
+          type: string
+          example: Ponta
+          minLength: 2
+      responses:
+        '200':
+          description: Cidades encontradas
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Cidade'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          description: Pesquisa com menos de 2 letras
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: PESQUISA_CURTA
+                mensagem: Pesquisa com menos de 2 letras
+        '503':
+          description: Serviço meteorológico indisponível
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: METEO_INDISPONIVEL
+                mensagem: Serviço meteorológico indisponível
+  /webhooks/weather-alerts:
+    post:
+      operationId: receiveWeatherAlert
+      summary: Receber um alerta meteorológico (webhook)
+      description: |-
+        **SUG-07** · Chamado pelo fornecedor de alertas, nunca pela app. A EAPI valida a assinatura, responde 202 logo e reencaminha para a Weather SAPI, que ignora alertas repetidos e publica o evento. A app recebe weather:alert por WebSocket (SUG-06).
+
+        **Fluxo:** Fornecedor de alertas → EAPI → Weather SAPI.
+
+        **Rastreabilidade:** US28 · UC-39 · FR-13
+
+        **Evento publicado:** `weather.alert (pela Weather SAPI)`
+      tags:
+      - Webhooks
+      security:
+      - assinaturaWebhook: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertaWebhook'
+      responses:
+        '202':
+          description: Alerta aceite para processamento
+        '401':
+          description: Assinatura inválida
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: ASSINATURA_INVALIDA
+                mensagem: Assinatura inválida
+  /wear-logs:
+    get:
+      operationId: listWearLogs
+      summary: Consultar o histórico
+      description: |-
+        **HIS-02** · Ordenado por data. Semana atual por omissão; máximo 92 dias.
+
+        **Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US10 · UC-16 · FR-09
+      tags:
+      - Histórico
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-16'
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-22'
+      responses:
+        '200':
+          description: Registos de uso
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RegistoUso'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    post:
+      operationId: createWearLog
+      summary: Registar o conjunto usado num dia
+      description: |-
+        **HIS-01** · Copia o nome e as peças do conjunto, para o histórico sobreviver se o conjunto for apagado. Se a data for hoje, guarda também o tempo.
+
+        **Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI (posse + RegistoUso) e Weather SAPI (tempo de hoje).
+
+        **Rastreabilidade:** US09 · UC-15 · FR-09
+
+        **Evento publicado:** `planner.outfit.worn`
+      tags:
+      - Histórico
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegistoUsoCriar'
+            example:
+              idConjunto: 9
+              dataUso: '2026-11-19'
+      responses:
+        '201':
+          description: Registo criado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistoCriado'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /wear-logs/{idRegistoUso}:
+    parameters:
+    - name: idRegistoUso
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 130
+    delete:
+      operationId: deleteWearLog
+      summary: Anular um registo de uso
+      description: |-
+        **HIS-04** · Corrige um registo feito por engano (conjunto ou dia errado). Para trocar, apaga-se e regista-se de novo em POST /wear-logs; não há PATCH porque o registo é uma fotografia do dia (nome, peças e tempo copiados) e editá-lo partiria essa cópia.
+
+        Eliminação física: as RegistoUsoPeca saem pelo ON DELETE CASCADE, e as estatísticas (HIS-03) e o «evitar repetição» das sugestões deixam de contar o registo. Serve para qualquer origem (manual, sugestao, evento). Se veio de uma sugestão aceite, a sugestão fica em estado = aceite.
+
+        **Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US10 · UC-16 · FR-09
+
+        **Evento publicado:** `planner.wearlog.deleted`
+      tags:
+      - Histórico
+      responses:
+        '204':
+          description: Registo eliminado
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /wear-logs/stats:
+    get:
+      operationId: getWearStats
+      summary: Ver as peças mais e menos usadas
+      description: |-
+        **HIS-03** · Conta as peças de cada registo (RegistoUsoPeca), incluindo as das sugestões aceites.
+
+        **Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US11 · UC-17 · FR-09
+      tags:
+      - Histórico
+      parameters:
+      - name: periodo
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - 30d
+          - 90d
+          default: 30d
+      - name: idPeca
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          example: 42
+        description: Só esta peça (ecrã Piece detail)
+      responses:
+        '200':
+          description: Estatísticas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Estatisticas'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /calendar/events:
+    get:
+      operationId: listEvents
+      summary: Ver os eventos do mês
+      description: |-
+        **CAL-01** · Envie month, ou from + limit (cartão «Coming up» do desktop). Cada Evento vem completo, com o conjunto associado: o detalhe de um evento abre a partir da lista, por isso não há GET /calendar/events/{idEvento}.
+
+        **Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US19 · UC-23 · FR-10
+      tags:
+      - Calendário
+      parameters:
+      - name: month
+        in: query
+        required: false
+        schema:
+          type: string
+          example: 2026-12
+          pattern: ^\d{4}-(0[1-9]|1[0-2])$
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+          example: '2026-11-19'
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 50
+          example: 2
+      responses:
+        '200':
+          description: Eventos
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    post:
+      operationId: createEvent
+      summary: Criar evento
+      description: |-
+        **CAL-02** · O conjunto é opcional (Evento 0..1 Conjunto).
+
+        **Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI (posse do conjunto + Evento).
+
+        **Rastreabilidade:** US17, US18 · UC-21, UC-22 · FR-10
+
+        **Evento publicado:** `planner.plan.changed`
+      tags:
+      - Calendário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoCriar'
+            example:
+              titulo: Jantar de curso
+              dataEvento: '2026-12-12'
+              horaInicio: '20:00'
+              idConjunto: 9
+      responses:
+        '201':
+          description: Evento criado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  idEvento:
+                    type: integer
+                    minimum: 1
+                    example: 15
+                required:
+                - idEvento
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          description: O conjunto não é do utilizador
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: CONJUNTO_INVALIDO
+                mensagem: O conjunto não é do utilizador
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /calendar/events/{idEvento}:
+    parameters:
+    - name: idEvento
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 15
+    patch:
+      operationId: updateEvent
+      summary: Editar o evento ou trocar o conjunto
+      description: |-
+        **CAL-03** · idConjunto = null tira o conjunto.
+
+        **Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI.
+
+        **Rastreabilidade:** US18, US19 · UC-22, UC-24 · FR-10
+
+        **Evento publicado:** `planner.plan.changed`
+      tags:
+      - Calendário
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventoAlterar'
+            example:
+              idConjunto: null
+      responses:
+        '200':
+          description: Evento atualizado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Evento'
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteEvent
+      summary: Eliminar o evento
+      description: "**CAL-04** · \n\n**Fluxo:** EAPI → Planner PAPI → Wardrobe SAPI.\n\n**Rastreabilidade:** US19 · UC-25\
+        \ · FR-10\n\n**Evento publicado:** `planner.plan.changed`"
+      tags:
+      - Calendário
+      responses:
+        '204':
+          description: Evento eliminado
+        '401':
+          $ref: '#/components/responses/NaoAutenticado'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+components:
+  securitySchemes:
+    auth0:
+      type: openIdConnect
+      openIdConnectUrl: https://garms.eu.auth0.com/.well-known/openid-configuration
+      description: |-
+        Access token (JWT RS256) emitido pelo Auth0 com `audience` = identificador da API do GARMS. A app obtém-no com o Authorization Code Flow com PKCE e envia-o em `Authorization: Bearer`. O URL acima usa o nome de tenant `garms` como exemplo: trocar pelo tenant real.
+    assinaturaWebhook:
+      type: apiKey
+      in: header
+      name: X-Signature
+      description: Assinatura HMAC do corpo, com o segredo partilhado com o fornecedor de alertas.
+  schemas:
+    ResumoFavoritos:
+      type: object
+      properties:
+        pecas:
+          type: integer
+          example: 6
+        conjuntos:
+          type: integer
+          example: 2
+      required:
+      - pecas
+      - conjuntos
+    Contadores:
+      type: object
+      properties:
+        pecas:
+          type: integer
+          example: 34
+        conjuntos:
+          type: integer
+          example: 9
+        usos:
+          type: integer
+          example: 51
+      required:
+      - pecas
+      - conjuntos
+      - usos
+    Notificacoes:
+      type: object
+      properties:
+        notificacoesAtivas:
+          type: boolean
+          example: true
+      required:
+      - notificacoesAtivas
+    PreferenciasEstilo:
+      type: object
+      properties:
+        estilos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estilo'
+          maxItems: 3
+          uniqueItems: true
+          example:
+          - casual
+          - minimalista
+        priorizarFavorito:
+          type: boolean
+          example: true
+        evitarRepeticao:
+          type: boolean
+          example: true
+        aprenderComUso:
+          type: boolean
+          example: true
+      required:
+      - estilos
+      - priorizarFavorito
+      - evitarRepeticao
+      - aprenderComUso
+    Estilo:
+      type: string
+      enum:
+      - casual
+      - minimalista
+      - classico
+      - elegante
+      - desportivo
+      - streetwear
+      - boho
+      example: casual
+    EventoAlterar:
+      type: object
+      properties:
+        titulo:
+          type: string
+          example: Jantar de curso
+          minLength: 1
+          maxLength: 45
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-13'
+        horaInicio:
+          type:
+          - string
+          - 'null'
+          example: '21:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type:
+          - string
+          - 'null'
+          example: Lagoa
+          maxLength: 100
+        nota:
+          type:
+          - string
+          - 'null'
+          maxLength: 255
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+          description: null tira o conjunto do evento
+      minProperties: 1
+    EventoCriar:
+      type: object
+      properties:
+        titulo:
+          type: string
+          example: Jantar de curso
+          minLength: 1
+          maxLength: 45
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-12'
+        horaInicio:
+          type: string
+          example: '20:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type: string
+          example: Ponta Delgada
+          maxLength: 100
+        nota:
+          type: string
+          example: Levar casaco
+          maxLength: 255
+        idConjunto:
+          type: integer
+          minimum: 1
+          example: 9
+      required:
+      - titulo
+      - dataEvento
+    Evento:
+      type: object
+      properties:
+        idEvento:
+          type: integer
+          minimum: 1
+          example: 15
+        titulo:
+          type: string
+          example: Jantar de curso
+        dataEvento:
+          type: string
+          format: date
+          example: '2026-12-12'
+        horaInicio:
+          type:
+          - string
+          - 'null'
+          example: '20:00'
+          pattern: ^([01][0-9]|2[0-3]):[0-5][0-9]$
+        local:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+        nota:
+          type:
+          - string
+          - 'null'
+          example: Levar casaco
+        conjunto:
+          type:
+          - object
+          - 'null'
+          properties:
+            idConjunto:
+              type: integer
+              minimum: 1
+              example: 9
+            nome:
+              type: string
+              example: Ida à faculdade
+          required:
+          - idConjunto
+          - nome
+      required:
+      - idEvento
+      - titulo
+      - dataEvento
+    Estatisticas:
+      type: object
+      properties:
+        periodo:
+          type: string
+          enum:
+          - 30d
+          - 90d
+          example: 30d
+        maisUsadas:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsoPeca'
+        menosUsadas:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsoPeca'
+      required:
+      - periodo
+      - maisUsadas
+      - menosUsadas
+    UsoPeca:
+      type: object
+      properties:
+        peca:
+          $ref: '#/components/schemas/PecaSugerida'
+        vezes:
+          type: integer
+          minimum: 0
+          example: 8
+      required:
+      - peca
+      - vezes
+    PecaSugerida:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        nome:
+          type: string
+          example: Casaco impermeável
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+      required:
+      - idPeca
+      - nome
+    RegistoUso:
+      type: object
+      properties:
+        idRegistoUso:
+          type: integer
+          minimum: 1
+          example: 130
+        dataUso:
+          type: string
+          format: date
+          example: '2026-11-19'
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+        nomeConjunto:
+          type: string
+          example: Ida à faculdade
+        origem:
+          type: string
+          enum:
+          - sugestao
+          - manual
+          - evento
+          example: manual
+        condicaoMeteo:
+          type:
+          - string
+          - 'null'
+          example: chuva
+        temperatura:
+          type:
+          - number
+          - 'null'
+          example: 17.5
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PecaNoConjunto'
+      required:
+      - idRegistoUso
+      - dataUso
+      - nomeConjunto
+      - origem
+      - pecas
+    PecaNoConjunto:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+        eliminada:
+          type: boolean
+          example: false
+      required:
+      - idPeca
+      - eliminada
+    Localizacao:
+      type: object
+      properties:
+        localizacaoAtiva:
+          type: boolean
+          example: false
+          description: true = usar o GPS; false = usar a cidade escolhida
+        cidade:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+          maxLength: 45
+        latitude:
+          type:
+          - number
+          - 'null'
+          example: 37.74
+          minimum: -90
+          maximum: 90
+          description: Arredondada a 2 casas decimais (NFR-05)
+        longitude:
+          type:
+          - number
+          - 'null'
+          example: -25.67
+          minimum: -180
+          maximum: 180
+      required:
+      - localizacaoAtiva
+    Cidade:
+      type: object
+      properties:
+        cidade:
+          type: string
+          example: Ponta Delgada
+        pais:
+          type: string
+          example: Portugal
+        latitude:
+          type: number
+          example: 37.74
+        longitude:
+          type: number
+          example: -25.67
+      required:
+      - cidade
+      - pais
+      - latitude
+      - longitude
+    Sugestao:
+      type: object
+      properties:
+        idSugestao:
+          type: integer
+          minimum: 1
+          example: 88
+        dataAlvo:
+          type: string
+          format: date
+          example: '2026-11-19'
+        descricao:
+          type:
+          - string
+          - 'null'
+          example: Casual para dia de chuva
+        motivos:
+          type: array
+          items:
+            type: string
+            example: 'Chuva prevista: peça impermeável'
+          example:
+          - 'Chuva prevista: peça impermeável'
+          - 'Estilo preferido: casual'
+        estado:
+          type: string
+          enum:
+          - proposta
+          - aceite
+          - trocada
+          example: proposta
+        idConjunto:
+          type:
+          - integer
+          - 'null'
+          minimum: 1
+          example: 9
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PecaSugerida'
+          minItems: 1
+      required:
+      - idSugestao
+      - dataAlvo
+      - motivos
+      - estado
+      - pecas
+    Meteorologia:
+      type: object
+      properties:
+        temperatura:
+          type: number
+          example: 17.5
+          description: °C
+        estado:
+          type: string
+          example: chuva
+        min:
+          type: number
+          example: 14.0
+        max:
+          type: number
+          example: 19.0
+        chuva:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 70
+          description: Probabilidade de precipitação (%)
+        atualizadoEm:
+          type: string
+          format: date-time
+          example: '2026-11-19T08:00:00Z'
+      required:
+      - temperatura
+      - estado
+      - min
+      - max
+      - chuva
+      - atualizadoEm
+    ConjuntoAlterar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Ida à faculdade (inverno)
+          minLength: 1
+          maxLength: 45
+        codigoEstilo:
+          oneOf:
+          - $ref: '#/components/schemas/Estilo'
+          - type: 'null'
+        pecas:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 42
+          minItems: 2
+          uniqueItems: true
+      minProperties: 1
+    ConjuntoCriar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Ida à faculdade
+          minLength: 1
+          maxLength: 45
+        codigoEstilo:
+          $ref: '#/components/schemas/Estilo'
+        pecas:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 42
+          minItems: 2
+          uniqueItems: true
+          description: idPeca; 2 ou mais, sem peças eliminadas
+      required:
+      - nome
+      - pecas
+    Conjunto:
+      type: object
+      properties:
+        idConjunto:
+          type: integer
+          minimum: 1
+          example: 9
+        nome:
+          type: string
+          example: Ida à faculdade
+        codigoEstilo:
+          oneOf:
+          - $ref: '#/components/schemas/Estilo'
+          - type: 'null'
+        conjuntoFavorito:
+          type: boolean
+          example: false
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/PecaNoConjunto'
+        usos:
+          type: integer
+          minimum: 0
+          example: 3
+      required:
+      - idConjunto
+      - nome
+      - codigoEstilo
+      - conjuntoFavorito
+      - pecas
+      - usos
+    FicheiroImagem:
+      type: object
+      properties:
+        ficheiro:
+          type: string
+          format: binary
+          description: JPEG, PNG ou WebP, até 5 MB
+      required:
+      - ficheiro
+    Foto:
+      type: object
+      properties:
+        foto:
+          type: string
+          example: pecas/7/2b1f0c.jpg
+          description: Caminho no bucket, a enviar em POST /pieces
+        url:
+          type: string
+          format: uri
+          example: https://storage.exemplo/pecas/7/2b1f0c.jpg?assinatura=…
+      required:
+      - foto
+      - url
+    ConjuntoFavorito:
+      type: object
+      properties:
+        conjuntoFavorito:
+          type: boolean
+          example: true
+      required:
+      - conjuntoFavorito
+    Favorita:
+      type: object
+      properties:
+        favorita:
+          type: boolean
+          example: true
+      required:
+      - favorita
+    PecaAlterar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Casaco de chuva
+          minLength: 1
+          maxLength: 45
+        idCategoria:
+          type: integer
+          minimum: 1
+          example: 3
+        estacao:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+          minItems: 1
+          uniqueItems: true
+        corNome:
+          type: string
+          example: preto
+          maxLength: 45
+        corCodigo:
+          type: string
+          example: '#000000'
+          pattern: ^#[0-9A-Fa-f]{6}$
+        etiquetasMeteo:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 2
+          uniqueItems: true
+        foto:
+          type: string
+          example: pecas/7/9a7e11.jpg
+          description: Nova foto carregada em POST /photos
+      minProperties: 1
+    Estacao:
+      type: string
+      enum:
+      - primavera
+      - verao
+      - outono
+      - inverno
+      example: outono
+    PecaCriar:
+      type: object
+      properties:
+        foto:
+          type: string
+          example: pecas/7/2b1f0c.jpg
+          description: Caminho devolvido por POST /photos (ADD-01)
+        nome:
+          type: string
+          example: Casaco impermeável
+          minLength: 1
+          maxLength: 45
+        idCategoria:
+          type: integer
+          minimum: 1
+          example: 3
+        estacao:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+          minItems: 1
+          uniqueItems: true
+        corNome:
+          type: string
+          example: azul-marinho
+          maxLength: 45
+        corCodigo:
+          type: string
+          example: '#1E3A8A'
+          pattern: ^#[0-9A-Fa-f]{6}$
+        etiquetasMeteo:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            example: 2
+          uniqueItems: true
+          description: idEtiquetaMeteorologica; pode ir vazia
+      required:
+      - foto
+      - nome
+      - idCategoria
+      - estacao
+      - corNome
+      - corCodigo
+    Peca:
+      allOf:
+      - $ref: '#/components/schemas/PecaResumo'
+      - type: object
+        properties:
+          fotoUrl:
+            type: string
+            format: uri
+            example: https://storage.exemplo/pecas/7/42.jpg?assinatura=…
+          estadoFoto:
+            type: string
+            enum:
+            - pendente
+            - processada
+            - falhou
+            example: processada
+          etiquetasMeteo:
+            type: array
+            items:
+              $ref: '#/components/schemas/EtiquetaMeteorologica'
+          dataCriado:
+            type: string
+            format: date-time
+            example: '2026-11-02T18:20:00Z'
+          usos:
+            type: integer
+            minimum: 0
+            example: 5
+            description: Vezes que a peça foi usada (RegistoUsoPeca)
+        required:
+        - fotoUrl
+        - estadoFoto
+        - etiquetasMeteo
+        - dataCriado
+    PecaResumo:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        nome:
+          type: string
+          example: Casaco impermeável
+        categoria:
+          $ref: '#/components/schemas/Categoria'
+        estacao:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+        corNome:
+          type: string
+          example: azul-marinho
+        corCodigo:
+          type: string
+          example: '#1E3A8A'
+          pattern: ^#[0-9A-Fa-f]{6}$
+        miniaturaUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/pecas/7/thumb_42.webp?assinatura=…
+        favorita:
+          type: boolean
+          example: true
+      required:
+      - idPeca
+      - nome
+      - categoria
+      - estacao
+      - corNome
+      - corCodigo
+      - favorita
+    Categoria:
+      type: object
+      properties:
+        idCategoria:
+          type: integer
+          minimum: 1
+          example: 3
+        nome:
+          type: string
+          example: Casacos
+      required:
+      - idCategoria
+      - nome
+    EtiquetaMeteorologica:
+      type: object
+      properties:
+        idEtiquetaMeteorologica:
+          type: integer
+          minimum: 1
+          example: 2
+        codigo:
+          type: string
+          example: chuva
+        nomeApresentado:
+          type: string
+          example: Chuva
+        grupo:
+          type: string
+          enum:
+          - temperatura
+          - condicao
+          example: condicao
+      required:
+      - idEtiquetaMeteorologica
+      - codigo
+      - nomeApresentado
+      - grupo
+    Catalogo:
+      type: object
+      properties:
+        categorias:
+          type: array
+          items:
+            $ref: '#/components/schemas/Categoria'
+        estacoes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estacao'
+        estilos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estilo'
+        etiquetasMeteo:
+          type: array
+          items:
+            $ref: '#/components/schemas/EtiquetaMeteorologica'
+      required:
+      - categorias
+      - estacoes
+      - estilos
+      - etiquetasMeteo
+    Erro:
+      type: object
+      properties:
+        codigo:
+          type: string
+          example: NAO_ENCONTRADO
+        mensagem:
+          type: string
+          example: Recurso não encontrado.
+        campos:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+                example: nome
+              erro:
+                type: string
+                example: máximo 45 caracteres
+          description: Só nos erros de validação (422)
+      required:
+      - codigo
+      - mensagem
+    Conta:
+      type: object
+      properties:
+        idUtilizador:
+          type: integer
+          minimum: 1
+          example: 7
+        nome:
+          type: string
+          example: Sara Freire
+        email:
+          type: string
+          example: sara@exemplo.pt
+          format: email
+          description: Vem do Auth0 (só de leitura)
+        fotoPerfilUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/avatares/7.jpg?assinatura=…
+        dataCriado:
+          type: string
+          format: date-time
+          example: '2026-10-01T10:00:00Z'
+      required:
+      - idUtilizador
+      - nome
+      - email
+      - dataCriado
+    Me:
+      allOf:
+      - $ref: '#/components/schemas/Conta'
+      - type: object
+        properties:
+          contadores:
+            $ref: '#/components/schemas/Contadores'
+        required:
+        - contadores
+    ContaAlterar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Sara F.
+          minLength: 1
+          maxLength: 45
+      required:
+      - nome
+    FotoPerfil:
+      type: object
+      properties:
+        fotoPerfilUrl:
+          type: string
+          format: uri
+          example: https://storage.exemplo/avatares/7.jpg?assinatura=…
+      required:
+      - fotoPerfilUrl
+    PreferenciasVista:
+      allOf:
+      - $ref: '#/components/schemas/PreferenciasEstilo'
+      - type: object
+        properties:
+          localizacaoAtiva:
+            type: boolean
+            example: false
+          cidade:
+            type:
+            - string
+            - 'null'
+            example: Ponta Delgada
+          notificacoesAtivas:
+            type: boolean
+            example: true
+          favoritos:
+            $ref: '#/components/schemas/ResumoFavoritos'
+        required:
+        - localizacaoAtiva
+        - notificacoesAtivas
+        - favoritos
+    LocalizacaoGuardada:
+      type: object
+      properties:
+        localizacaoAtiva:
+          type: boolean
+          example: false
+        cidade:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+      required:
+      - localizacaoAtiva
+    Hoje:
+      type: object
+      properties:
+        meteorologia:
+          oneOf:
+          - $ref: '#/components/schemas/Meteorologia'
+          - type: 'null'
+        sugestao:
+          oneOf:
+          - $ref: '#/components/schemas/Sugestao'
+          - type: 'null'
+        proximosEventos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evento'
+          maxItems: 2
+          description: Só usado no desktop (cartão «Coming up»)
+      required:
+      - meteorologia
+      - sugestao
+      - proximosEventos
+    PecaCriada:
+      type: object
+      properties:
+        idPeca:
+          type: integer
+          minimum: 1
+          example: 42
+        estadoFoto:
+          type: string
+          enum:
+          - pendente
+          example: pendente
+      required:
+      - idPeca
+      - estadoFoto
+    RegistoCriado:
+      type: object
+      properties:
+        idRegistoUso:
+          type: integer
+          minimum: 1
+          example: 130
+      required:
+      - idRegistoUso
+    RegistoUsoCriar:
+      type: object
+      properties:
+        idConjunto:
+          type: integer
+          minimum: 1
+          example: 9
+        dataUso:
+          type: string
+          format: date
+          example: '2026-11-19'
+          description: Hoje por omissão; não pode ser futura
+      required:
+      - idConjunto
+    Exportacao:
+      type: object
+      properties:
+        conta:
+          $ref: '#/components/schemas/Conta'
+        preferencias:
+          type: object
+        pecas:
+          type: array
+          items:
+            $ref: '#/components/schemas/Peca'
+        conjuntos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Conjunto'
+        historico:
+          type: array
+          items:
+            $ref: '#/components/schemas/RegistoUso'
+        eventos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Evento'
+      required:
+      - conta
+      - pecas
+      - conjuntos
+      - historico
+      - eventos
+      description: Todos os dados da pessoa guardados no GARMS (RGPD). Os dados de login ficam no Auth0, que tem a sua própria exportação.
+    AlertaWebhook:
+      type: object
+      properties:
+        alertId:
+          type: string
+          example: tmrw-alert-98765
+        eventType:
+          type: string
+          example: ALERT_START
+        data:
+          type: object
+          additionalProperties: true
+          example:
+            location: 37.74,-25.67
+            type: heavy_rain
+            severity: moderate
+      required:
+      - alertId
+      - eventType
+      - data
+      description: Formato do fornecedor de alertas; a EAPI não o interpreta, só o reencaminha
+  responses:
+    NaoAutenticado:
+      description: Sem token, ou token expirado ou inválido (assinatura, emissor ou audience)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_AUTENTICADO
+            mensagem: Sessão expirada.
+    NaoEncontrado:
+      description: Não existe ou não pertence ao utilizador (404 em vez de 403, NFR-05)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_ENCONTRADO
+            mensagem: Recurso não encontrado.
+    Validacao:
+      description: Dados inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: VALIDACAO
+            mensagem: Há campos inválidos.
+            campos:
+            - campo: nome
+              erro: máximo 45 caracteres
+    DemasiadosPedidos:
+      description: Demasiados pedidos (rate limiting da EAPI)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: DEMASIADOS_PEDIDOS
+            mensagem: Tente daqui a pouco.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            example: 30

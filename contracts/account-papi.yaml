@@ -1,0 +1,538 @@
+openapi: 3.1.0
+info:
+  title: Digital Wardrobe — Account PAPI (Process API)
+  version: 2.0.0
+  description: |-
+    Process API da conta: ligação à conta do Auth0, perfil, preferências, localização, notificações e eliminação da conta (RGPD).
+
+    A autenticação é feita pelo Auth0 (OAuth 2.0 + OpenID Connect). Este serviço não guarda passwords nem emite tokens. É o único que fala com a Management API do Auth0 (credenciais machine-to-machine), para apagar a conta no Auth0 quando o utilizador elimina a conta.
+
+    - **Consumidor:** só a EAPI, que envia o utilizador autenticado em `X-User-Id`.
+    - **Dependências:** User SAPI; Wardrobe SAPI (foto de perfil); Auth0 Management API.
+    - **Publica:** `user.preferences.updated`, `user.location.updated`, `user.deleted`.
+
+    IDs inteiros e nomes de campos iguais às colunas da base de dados. Erros no formato `Erro`. Todos os pedidos levam `X-Internal-Api-Key`.
+servers:
+- url: http://account-papi.internal:3004/api/v1
+  description: Rede privada (não acessível da internet)
+- url: http://localhost:3004/api/v1
+  description: Desenvolvimento local
+security:
+- chaveInterna: []
+tags:
+- name: Conta
+- name: Preferências
+paths:
+  /accounts:
+    post:
+      operationId: resolveAccount
+      summary: Obter ou criar a conta de um utilizador do Auth0
+      description: |-
+        **Usado por:** EAPI (ACC-01), quando recebe um token com um `sub` que ainda não tem em cache.
+
+        Idempotente: se já existe Utilizador com este `authSub`, devolve-o (200); se não, cria-o com o nome e o email do token e a PreferenciaUtilizador por omissão (201). A EAPI guarda a correspondência `authSub → idUtilizador` no Redis.
+
+        **Chama:** User SAPI GET /users?authSub=, POST /users.
+      tags:
+      - Conta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContaResolver'
+      responses:
+        '200':
+          description: Conta já existia
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conta'
+        '201':
+          description: Conta criada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conta'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '409':
+          description: O email já pertence a outra conta (outro método de login)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: EMAIL_JA_REGISTADO
+                mensagem: Já existe uma conta com este email. Entre com o método que usou da primeira vez.
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /accounts/{idUtilizador}:
+    parameters:
+    - name: idUtilizador
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 7
+    get:
+      operationId: getAccount
+      summary: Obter os dados da conta
+      description: |-
+        **Usado por:** EAPI (ACC-04, PER-07).
+
+        **Chama:** User SAPI GET /users/{idUtilizador}.
+      tags:
+      - Conta
+      responses:
+        '200':
+          description: Conta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conta'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '404':
+          $ref: '#/components/responses/NaoEncontrado'
+  /me:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    patch:
+      operationId: updateProfile
+      summary: Alterar o nome
+      description: |-
+        **Usado por:** EAPI (PER-01).
+
+        O email é gerido pelo Auth0 e não se altera aqui. **Chama:** User SAPI PATCH /users/{idUtilizador}.
+      tags:
+      - Conta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContaAlterar'
+      responses:
+        '200':
+          description: Conta atualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conta'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+    delete:
+      operationId: deleteAccount
+      summary: Eliminar a conta (RGPD)
+      description: |-
+        **Usado por:** EAPI (PER-08). A EAPI já confirmou que o login é recente.
+
+        Ordem: 1) User SAPI GET /users/{idUtilizador} (para obter o authSub); 2) Auth0 Management API DELETE /api/v2/users/{authSub}; 3) User SAPI DELETE /users/{idUtilizador}. Se o Auth0 falhar, não se apaga nada e responde 502.
+
+        **Publica:** `user.deleted`.
+      tags:
+      - Conta
+      responses:
+        '204':
+          description: Conta eliminada
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '502':
+          description: O Auth0 não respondeu; nada foi apagado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: AUTH_INDISPONIVEL
+                mensagem: Não foi possível eliminar a conta. Tente daqui a pouco.
+  /me/avatar:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    put:
+      operationId: updateAvatar
+      summary: Mudar a foto de perfil
+      description: |-
+        **Usado por:** EAPI (PER-02).
+
+        **Chama:** Wardrobe SAPI POST /photos?tipo=avatar, User SAPI PATCH /users/{idUtilizador} {fotoPerfil}.
+      tags:
+      - Conta
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/FicheiroImagem'
+      responses:
+        '200':
+          description: Foto atualizada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FotoPerfil'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '413':
+          description: Ficheiro maior que 5 MB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FICHEIRO_GRANDE
+                mensagem: Ficheiro maior que 5 MB
+        '415':
+          description: Formato não suportado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Erro'
+              example:
+                codigo: FORMATO_INVALIDO
+                mensagem: Formato não suportado
+  /me/location:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    put:
+      operationId: updateLocation
+      summary: Guardar a localização
+      description: |-
+        **Usado por:** EAPI (SUG-05).
+
+        Arredonda as coordenadas a 2 casas (NFR-05). **Chama:** User SAPI PATCH /users/{idUtilizador}/preferences.
+
+        **Publica:** `user.location.updated`.
+      tags:
+      - Preferências
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Localizacao'
+      responses:
+        '200':
+          description: Localização guardada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Localizacao'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /me/preferences:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    get:
+      operationId: getPreferences
+      summary: Obter as preferências
+      description: |-
+        **Usado por:** EAPI (PER-04, SUG-01: localização guardada).
+
+        **Chama:** User SAPI GET /users/{idUtilizador}/preferences.
+      tags:
+      - Preferências
+      responses:
+        '200':
+          description: Preferências
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasUtilizador'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+    put:
+      operationId: updatePreferences
+      summary: Guardar as preferências de estilo
+      description: |-
+        **Usado por:** EAPI (PER-05).
+
+        Valida no máximo 3 estilos. **Chama:** User SAPI PUT /users/{idUtilizador}/preferences.
+
+        **Publica:** `user.preferences.updated`.
+      tags:
+      - Preferências
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PreferenciasEstilo'
+      responses:
+        '200':
+          description: Guardadas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenciasEstilo'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+  /me/notifications:
+    parameters:
+    - $ref: '#/components/parameters/XUserId'
+    put:
+      operationId: updateNotifications
+      summary: Ligar ou desligar as notificações
+      description: |-
+        **Usado por:** EAPI (PER-06).
+
+        **Chama:** User SAPI PATCH /users/{idUtilizador}/preferences.
+      tags:
+      - Preferências
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Notificacoes'
+      responses:
+        '200':
+          description: Guardado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Notificacoes'
+        '401':
+          $ref: '#/components/responses/ChaveInterna'
+        '422':
+          $ref: '#/components/responses/Validacao'
+components:
+  securitySchemes:
+    chaveInterna:
+      type: apiKey
+      in: header
+      name: X-Internal-Api-Key
+      description: Chave partilhada entre serviços na rede privada. Só a EAPI é pública.
+  schemas:
+    FicheiroImagem:
+      type: object
+      properties:
+        ficheiro:
+          type: string
+          format: binary
+          description: JPEG, PNG ou WebP, até 5 MB
+      required:
+      - ficheiro
+    Notificacoes:
+      type: object
+      properties:
+        notificacoesAtivas:
+          type: boolean
+          example: true
+      required:
+      - notificacoesAtivas
+    Localizacao:
+      type: object
+      properties:
+        localizacaoAtiva:
+          type: boolean
+          example: false
+          description: true = usar o GPS; false = usar a cidade escolhida
+        cidade:
+          type:
+          - string
+          - 'null'
+          example: Ponta Delgada
+          maxLength: 45
+        latitude:
+          type:
+          - number
+          - 'null'
+          example: 37.74
+          minimum: -90
+          maximum: 90
+          description: Arredondada a 2 casas decimais (NFR-05)
+        longitude:
+          type:
+          - number
+          - 'null'
+          example: -25.67
+          minimum: -180
+          maximum: 180
+      required:
+      - localizacaoAtiva
+    PreferenciasEstilo:
+      type: object
+      properties:
+        estilos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Estilo'
+          maxItems: 3
+          uniqueItems: true
+          example:
+          - casual
+          - minimalista
+        priorizarFavorito:
+          type: boolean
+          example: true
+        evitarRepeticao:
+          type: boolean
+          example: true
+        aprenderComUso:
+          type: boolean
+          example: true
+      required:
+      - estilos
+      - priorizarFavorito
+      - evitarRepeticao
+      - aprenderComUso
+    Estilo:
+      type: string
+      enum:
+      - casual
+      - minimalista
+      - classico
+      - elegante
+      - desportivo
+      - streetwear
+      - boho
+      example: casual
+    PreferenciasUtilizador:
+      allOf:
+      - $ref: '#/components/schemas/PreferenciasEstilo'
+      - $ref: '#/components/schemas/Localizacao'
+      - $ref: '#/components/schemas/Notificacoes'
+    Erro:
+      type: object
+      properties:
+        codigo:
+          type: string
+          example: NAO_ENCONTRADO
+        mensagem:
+          type: string
+          example: Recurso não encontrado.
+        campos:
+          type: array
+          items:
+            type: object
+            properties:
+              campo:
+                type: string
+                example: nome
+              erro:
+                type: string
+                example: máximo 45 caracteres
+          description: Só nos erros de validação (422)
+      required:
+      - codigo
+      - mensagem
+    ContaResolver:
+      type: object
+      description: Dados tirados do access token do Auth0 pela EAPI (sub e claims de email e nome)
+      properties:
+        authSub:
+          type: string
+          example: google-oauth2|10769150350006150715113
+          maxLength: 255
+        nome:
+          type: string
+          example: Sara Freire
+          minLength: 1
+          maxLength: 45
+        email:
+          type: string
+          example: sara@exemplo.pt
+          format: email
+          maxLength: 255
+      required:
+      - authSub
+      - nome
+      - email
+    Conta:
+      type: object
+      properties:
+        idUtilizador:
+          type: integer
+          minimum: 1
+          example: 7
+        nome:
+          type: string
+          example: Sara Freire
+        email:
+          type: string
+          example: sara@exemplo.pt
+          format: email
+        fotoPerfilUrl:
+          type:
+          - string
+          - 'null'
+          format: uri
+          example: https://storage.exemplo/avatares/7.jpg?assinatura=…
+        dataCriado:
+          type: string
+          format: date-time
+          example: '2026-10-01T10:00:00Z'
+      required:
+      - idUtilizador
+      - nome
+      - email
+      - dataCriado
+    ContaAlterar:
+      type: object
+      properties:
+        nome:
+          type: string
+          example: Sara F.
+          minLength: 1
+          maxLength: 45
+      required:
+      - nome
+    FotoPerfil:
+      type: object
+      properties:
+        fotoPerfilUrl:
+          type: string
+          format: uri
+          example: https://storage.exemplo/avatares/7.jpg?assinatura=…
+      required:
+      - fotoPerfilUrl
+  responses:
+    NaoEncontrado:
+      description: Não existe ou não pertence ao utilizador (404 em vez de 403, NFR-05)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_ENCONTRADO
+            mensagem: Recurso não encontrado.
+    Validacao:
+      description: Dados inválidos
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: VALIDACAO
+            mensagem: Há campos inválidos.
+            campos:
+            - campo: nome
+              erro: máximo 45 caracteres
+    ChaveInterna:
+      description: Falta ou é inválida a chave interna (X-Internal-Api-Key)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Erro'
+          example:
+            codigo: NAO_AUTORIZADO
+            mensagem: Chave interna inválida.
+  parameters:
+    XUserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: idUtilizador que a EAPI obteve a partir do `sub` do access token do Auth0. Nunca vem do pedido da app.
+      schema:
+        type: integer
+        minimum: 1
+        example: 7

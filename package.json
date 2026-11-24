@@ -1,0 +1,18 @@
+{
+  "name": "garms",
+  "private": true,
+  "description": "GARMS (Digital Wardrobe): monorepo dos serviços Node (npm workspaces)",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspaces --if-present",
+    "dev:eapi": "npm run dev -w @garms/eapi"
+  }
+}

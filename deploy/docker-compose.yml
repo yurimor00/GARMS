@@ -1,12 +1,36 @@
 # GARMS: ambiente local (Docker Desktop)
 # Correr a partir da raiz do repositório:
 #   docker compose --env-file .env -f deploy/docker-compose.yml up -d
-# Por agora tem o MySQL, o RabbitMQ, o Redis, o Cloudflare Tunnel e um nginx de teste;
-# serviços e frontend entram aqui depois.
+# Tem o MySQL, o RabbitMQ, o Redis, a EAPI, o Cloudflare Tunnel e um nginx de teste;
+# os outros serviços e o frontend entram aqui depois.
+# Depois de mudar o código de um serviço: acrescentar --build ao "up -d".
 
 name: garms
 
 services:
+  # EAPI (porta 3000): única porta pública. Imagem construída a partir da raiz (packages/common).
+  eapi:
+    build:
+      context: ..
+      dockerfile: services/eapi/Dockerfile
+    image: garms-eapi:local
+    container_name: garms-eapi
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Dentro do compose os hosts são os nomes dos serviços (não localhost).
+      # As passwords vão no URL: se tiverem caracteres especiais (@ : / #), têm de estar em URL-encoding no .env.
+      REDIS_URL: redis://:${REDIS_PASSWORD:?Falta REDIS_PASSWORD no .env}@redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:?Falta RABBITMQ_USER no .env}:${RABBITMQ_PASSWORD:?Falta RABBITMQ_PASSWORD no .env}@rabbitmq:5672/garms
+    ports:
+      - "127.0.0.1:${EAPI_PORT:-3000}:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq-init:
+        condition: service_completed_successfully
+
+
   mysql:
     image: mysql:8.4
     container_name: garms-mysql

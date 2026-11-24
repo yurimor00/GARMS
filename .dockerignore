@@ -1,0 +1,24 @@
+# Contexto dos builds (feitos a partir da raiz): só entra o que os Dockerfiles copiam.
+# Segredos: NUNCA entram numa imagem
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Pesados ou desnecessários
+**/node_modules
+**/coverage
+**/test
+**/*.test.js
+.git
+.github
+.claude
+**/CLAUDE.md
+docs
+tests
+database
+deploy
+frontend
+contracts
+*.log

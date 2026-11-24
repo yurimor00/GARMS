@@ -1,7 +1,8 @@
 # GARMS: ambiente local (Docker Desktop)
 # Correr a partir da raiz do repositório:
 #   docker compose --env-file .env -f deploy/docker-compose.yml up -d
-# Por agora só tem o MySQL; RabbitMQ, Redis, serviços e frontend entram aqui depois.
+# Por agora tem o MySQL, o Cloudflare Tunnel e um nginx de teste;
+# RabbitMQ, Redis, serviços e frontend entram aqui depois.
 
 name: garms
 
@@ -32,6 +33,27 @@ services:
       timeout: 5s
       retries: 12
       start_period: 40s
+
+  # Cloudflare Tunnel: liga o domínio a este ambiente sem abrir portas no router.
+  # O destino de cada hostname é configurado no painel do Zero Trust e usa o nome
+  # do serviço do compose (ex.: http://nginx:8080), nunca localhost.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: garms-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      # O cloudflared lê o token desta variável (não aparece no docker ps)
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?Falta CLOUDFLARE_TUNNEL_TOKEN no .env}
+    depends_on:
+      - nginx
+
+  # nginx de teste: substituído pelo frontend (e pelo Traefik no cluster) mais tarde.
+  # Sem "ports": só é acessível pelo túnel, dentro da rede do compose.
+  nginx:
+    image: nginxinc/nginx-unprivileged:alpine
+    container_name: garms-nginx
+    restart: unless-stopped
 
 volumes:
   garms-mysql-data:

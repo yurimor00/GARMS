@@ -1,8 +1,8 @@
 # GARMS: ambiente local (Docker Desktop)
 # Correr a partir da raiz do repositório:
 #   docker compose --env-file .env -f deploy/docker-compose.yml up -d
-# Por agora tem o MySQL, o Cloudflare Tunnel e um nginx de teste;
-# RabbitMQ, Redis, serviços e frontend entram aqui depois.
+# Por agora tem o MySQL, o RabbitMQ, o Cloudflare Tunnel e um nginx de teste;
+# Redis, serviços e frontend entram aqui depois.
 
 name: garms
 
@@ -34,6 +34,49 @@ services:
       retries: 12
       start_period: 40s
 
+  # RabbitMQ: broker de eventos (exchange dw.events). Topologia em rabbitmq/definitions.json.
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: garms-rabbitmq
+    # Os dados ficam em mnesia/rabbit@<hostname>: hostname fixo para não os perder ao recriar
+    hostname: garms-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Falta RABBITMQ_USER no .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Falta RABBITMQ_PASSWORD no .env}
+      RABBITMQ_DEFAULT_VHOST: garms
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      # Painel de gestão só no próprio PC (nunca exposto pelo túnel)
+      - "127.0.0.1:${RABBITMQ_MGMT_PORT:-15672}:15672"
+    volumes:
+      - garms-rabbitmq-data:/var/lib/rabbitmq
+      - ./rabbitmq/10-garms.conf:/etc/rabbitmq/conf.d/10-garms.conf:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  # Corre uma vez depois do RabbitMQ estar "healthy" e aplica a topologia pela API de gestão
+  # (exchange dw.events, filas e dead-letter). Idempotente: pode correr a cada "up".
+  rabbitmq-init:
+    image: rabbitmq:3.13-management
+    container_name: garms-rabbitmq-init
+    restart: "no"
+    environment:
+      RMQ_USER: ${RABBITMQ_USER:?Falta RABBITMQ_USER no .env}
+      RMQ_PASS: ${RABBITMQ_PASSWORD:?Falta RABBITMQ_PASSWORD no .env}
+    entrypoint: ["sh", "-c"]
+    command:
+      - rabbitmqadmin -H rabbitmq -P 15672 -u "$$RMQ_USER" -p "$$RMQ_PASS" import /garms/definitions.json
+    volumes:
+      - ./rabbitmq/definitions.json:/garms/definitions.json:ro
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   # Cloudflare Tunnel: liga o domínio a este ambiente sem abrir portas no router.
   # O destino de cada hostname é configurado no painel do Zero Trust e usa o nome
   # do serviço do compose (ex.: http://nginx:8080), nunca localhost.
@@ -57,3 +100,4 @@ services:
 
 volumes:
   garms-mysql-data:
+  garms-rabbitmq-data:

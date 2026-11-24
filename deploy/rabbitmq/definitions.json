@@ -1,0 +1,51 @@
+{
+  "vhosts": [{ "name": "garms" }],
+  "exchanges": [
+    {
+      "name": "dw.events",
+      "vhost": "garms",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "dw.events.dlx",
+      "vhost": "garms",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "queues": [
+    {
+      "name": "reco.events",
+      "vhost": "garms",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": {
+        "x-queue-type": "quorum",
+        "x-delivery-limit": 5,
+        "x-dead-letter-exchange": "dw.events.dlx",
+        "x-dead-letter-routing-key": "reco.events"
+      }
+    },
+    {
+      "name": "reco.events.dlq",
+      "vhost": "garms",
+      "durable": true,
+      "auto_delete": false,
+      "arguments": { "x-queue-type": "quorum" }
+    }
+  ],
+  "bindings": [
+    { "source": "dw.events", "vhost": "garms", "destination": "reco.events", "destination_type": "queue", "routing_key": "user.*", "arguments": {} },
+    { "source": "dw.events", "vhost": "garms", "destination": "reco.events", "destination_type": "queue", "routing_key": "wardrobe.#", "arguments": {} },
+    { "source": "dw.events", "vhost": "garms", "destination": "reco.events", "destination_type": "queue", "routing_key": "planner.#", "arguments": {} },
+    { "source": "dw.events", "vhost": "garms", "destination": "reco.events", "destination_type": "queue", "routing_key": "weather.#", "arguments": {} },
+    { "source": "dw.events.dlx", "vhost": "garms", "destination": "reco.events.dlq", "destination_type": "queue", "routing_key": "reco.events", "arguments": {} }
+  ]
+}

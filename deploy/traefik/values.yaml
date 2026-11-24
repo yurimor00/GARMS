@@ -1,0 +1,47 @@
+# Traefik (Ingress e load balancer do cluster). Instalar/atualizar a partir da raiz:
+#   helm repo add traefik https://traefik.github.io/charts
+#   helm upgrade --install traefik traefik/traefik --version 43.0.0 -n traefik --create-namespace -f deploy/traefik/values.yaml
+#
+# O Traefik só encaminha (/ → frontend, /api e /ws → EAPI). Validação do token, rate limiting
+# e agregação continuam a ser da EAPI. O HTTPS público é terminado na Cloudflare (túnel),
+# por isso aqui só há HTTP.
+
+deployment:
+  replicas: 1
+
+# Só Ingress normal do Kubernetes (ingressClassName: traefik); sem Gateway API
+gateway:
+  enabled: false
+
+ingressClass:
+  enabled: true
+  isDefaultClass: true
+
+ports:
+  web:
+    # No Docker Desktop um Service LoadBalancer fica em localhost: http://localhost/
+    exposedPort: 80
+  websecure:
+    # TLS é feito pela Cloudflare; não abrir a 443 no PC
+    expose:
+      default: false
+
+# Painel do Traefik desligado (não se expõe); ver rotas com: kubectl -n traefik port-forward deploy/traefik 8080
+ingressRoute:
+  dashboard:
+    enabled: false
+
+# Logs em JSON, como os serviços (para a agregação centralizada). Access log: uma linha por pedido.
+log:
+  format: json
+  level: INFO
+accessLog:
+  enabled: true
+  format: json
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

@@ -21,6 +21,7 @@ coverage/
 test-results/
 playwright-report/
 report.html
+tests/reports/
 .pytest_cache/
 tests/e2e/.auth/
 storageState*.json

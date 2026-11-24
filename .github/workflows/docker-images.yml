@@ -2,6 +2,8 @@
 # - Pull request para a main: só constrói (verifica que o build não está partido).
 # - Merge (push) na main: constrói e publica no GHCR como ghcr.io/<dono>/garms-<pasta>.
 # Só entram as pastas que já têm Dockerfile (frontend/ e services/*/).
+# Os serviços são construídos a partir da raiz (por causa de packages/common); o .dockerignore da raiz
+# garante que o .env e outros segredos nunca entram numa imagem.
 
 name: Imagens Docker
 
@@ -34,7 +36,11 @@ jobs:
             for f in frontend/Dockerfile services/*/Dockerfile; do
               [ -f "$f" ] || continue
               dir=$(dirname "$f")
-              jq -nc --arg nome "$(basename "$dir")" --arg contexto "$dir" '{nome: $nome, contexto: $contexto}'
+              # Os serviços Node usam packages/common: o contexto do build é a raiz do repositório.
+              # O frontend é independente e usa a sua própria pasta.
+              case "$dir" in services/*) contexto=. ;; *) contexto=$dir ;; esac
+              jq -nc --arg nome "$(basename "$dir")" --arg contexto "$contexto" --arg dockerfile "$f" \
+                '{nome: $nome, contexto: $contexto, dockerfile: $dockerfile}'
             done | jq -sc '.'
           )
           echo "servicos=$servicos" >> "$GITHUB_OUTPUT"
@@ -84,6 +90,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.servico.contexto }}
+          file: ${{ matrix.servico.dockerfile }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

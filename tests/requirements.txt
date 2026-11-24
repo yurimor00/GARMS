@@ -1,0 +1,7 @@
+# Testes de API e E2E (pytest + Playwright). Instalar com:
+#   python -m venv tests/.venv
+#   tests/.venv/Scripts/pip install -r tests/requirements.txt      (Windows)
+#   tests/.venv/bin/pip install -r tests/requirements.txt          (Linux/CI)
+pytest>=8
+pytest-playwright>=0.7
+pytest-html>=4

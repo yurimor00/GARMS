@@ -33,6 +33,24 @@ Mudam 4 dos 8 contratos (versão 1.0.0 → 2.0.0). `wardrobe-papi` e `planner-pa
 - **Cache:** a cache da previsão, os locais seguidos e os alertIds vistos passam da memória para o Redis (partilhado pelas réplicas).
 - **Novo `POST /jobs/refresh-forecasts`:** é chamado pelo CronJob do Kubernetes de 30 em 30 minutos e publica `weather.updated`.
 
+## Fase 3: diferenças entre os contratos e a implementação
+
+Registo do que a implementação acrescenta ou muda face aos contratos (para o relatório da Fase 3).
+Os `.yaml` só mudam quando a diferença afetar quem chama a API.
+
+### Comum a todos os serviços (`packages/common`)
+
+- **Health checks:** todos os serviços expõem `GET /health/live` e `GET /health`, fora do `/api/v1` e sem autenticação.
+  - **`/health/live`:** 200 enquanto o processo estiver vivo. É a `livenessProbe` do Kubernetes e não verifica dependências, para uma falha do Redis não reiniciar todos os serviços.
+  - **`/health`:** 200 com `dependencias` (ex.: `{ redis: ok, rabbitmq: ok }`) ou 503 se alguma falhar. É a `readinessProbe`: a réplica sai do load balancer enquanto não estiver pronta.
+  - **Porquê fora dos contratos:** são infraestrutura, não API de negócio. Não passam pelo Traefik (o Ingress só encaminha `/api` e `/ws`) e nos serviços internos ficam fora da `X-Internal-Api-Key`, porque as probes não a enviam.
+- **Códigos de erro novos** (formato `Erro` igual; nenhum contrato os tinha):
+  - **400 `PEDIDO_INVALIDO`:** corpo que não é JSON válido.
+  - **413 `PEDIDO_DEMASIADO_GRANDE`:** corpo JSON acima de 1 MB. Os uploads de fotos continuam com o 413 `FICHEIRO_GRANDE` dos contratos.
+  - **500 `ERRO_INTERNO`:** erro inesperado. A mensagem é genérica, e o detalhe e o stack só vão para o log, com o `correlationId`.
+  - **404 `NAO_ENCONTRADO` em rotas que não existem:** o mesmo código dos contratos, com a mensagem «Rota não encontrada.», em vez da página HTML do Express.
+- **Cabeçalho `X-Correlation-Id`:** todas as respostas o devolvem. Se o pedido trouxer um válido (até 100 caracteres, `[A-Za-z0-9._:-]`), é reutilizado; senão é criado um UUID. Serve para seguir um pedido nos logs de todos os serviços. Ainda não está declarado nos `.yaml`.
+
 ## Fora dos contratos (por atualizar)
 
 - **`dw_schemas.mwb`:**

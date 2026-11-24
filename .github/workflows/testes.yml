@@ -1,0 +1,107 @@
+# Testes em cada pull request para a main (e em cada merge).
+# - unitarios: Vitest com cobertura, em todos os workspaces (packages/* e services/*).
+# - api: levanta Redis, RabbitMQ e EAPI com o mesmo docker-compose do ambiente local
+#        e corre os testes pytest (tests/api) contra a EAPI.
+# Os relatórios (cobertura e pytest-html) ficam como artefactos da execução: evidência para o relatório.
+
+name: Testes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: testes-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unitarios:
+    name: Unitários (Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: Testes com cobertura
+        run: npm run test:coverage
+
+      - name: Guardar relatórios de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobertura
+          path: |
+            packages/*/coverage/
+            services/*/coverage/
+          if-no-files-found: ignore
+
+  api:
+    name: API (pytest + Playwright)
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE: docker compose --env-file ci.env -f deploy/docker-compose.yml
+    steps:
+      - uses: actions/checkout@v4
+
+      # Valores só para a CI (descartáveis). O compose valida todas as variáveis obrigatórias,
+      # mesmo as dos serviços que aqui não arrancam (MySQL, túnel).
+      - name: Criar ci.env
+        run: |
+          gerar() { openssl rand -hex 16; }
+          cat > ci.env <<EOF
+          MYSQL_ROOT_PASSWORD=$(gerar)
+          MYSQL_PW_USER_SAPI=$(gerar)
+          MYSQL_PW_WARDROBE_SAPI=$(gerar)
+          MYSQL_PW_RECO=$(gerar)
+          CLOUDFLARE_TUNNEL_TOKEN=nao-usado-na-ci
+          RABBITMQ_USER=garms
+          RABBITMQ_PASSWORD=$(gerar)
+          REDIS_PASSWORD=$(gerar)
+          LOG_LEVEL=debug
+          EOF
+
+      - name: Levantar Redis, RabbitMQ e EAPI
+        run: $COMPOSE up -d --build --wait --wait-timeout 180 redis rabbitmq rabbitmq-init eapi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: tests/requirements.txt
+
+      - name: Instalar pytest e Playwright
+        run: pip install -r tests/requirements.txt
+
+      - name: Testes de API
+        working-directory: tests
+        run: pytest
+        env:
+          EAPI_URL: http://localhost:3000
+
+      - name: Logs dos containers (se falhar)
+        if: failure()
+        run: $COMPOSE logs --no-color
+
+      - name: Guardar relatório pytest-html
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-api
+          path: tests/reports/
+          if-no-files-found: ignore
+
+      - name: Desligar
+        if: always()
+        run: $COMPOSE down -v

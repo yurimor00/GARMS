@@ -1,0 +1,32 @@
+# Ingress (Traefik): o que é público. /api e /ws → EAPI; / → frontend (quando existir).
+# Os health checks (/health, /health/live) e os serviços internos ficam de fora de propósito.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: garms
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: eapi
+                port:
+                  name: http
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: eapi
+                port:
+                  name: http
+          # - path: /
+          #   pathType: Prefix
+          #   backend:
+          #     service:
+          #       name: frontend
+          #       port:
+          #         name: http

@@ -51,4 +51,17 @@ describe('EAPI: config', () => {
   it('recusa um LOG_LEVEL que não existe', () => {
     expect(() => lerConfig({ ...base, LOG_LEVEL: 'verbose' })).toThrow(/LOG_LEVEL/);
   });
+
+  it('ignora EAPI_PORT, que o Kubernetes injeta como tcp://IP:porta para o Service "eapi"', () => {
+    expect(lerConfig({ ...base, EAPI_PORT: 'tcp://10.105.0.1:3000' }).porta).toBe(3000);
+  });
+
+  it('PORT e TRUST_PROXY: aceita inteiros válidos e recusa o resto no arranque', () => {
+    expect(lerConfig({ ...base, PORT: '8080', TRUST_PROXY: '1' })).toMatchObject({ porta: 8080, trustProxy: 1 });
+    expect(lerConfig({ ...base, TRUST_PROXY: '' }).trustProxy).toBe(false);
+    for (const PORT of ['abc', '0', '70000', 'tcp://1.2.3.4:3000']) {
+      expect(() => lerConfig({ ...base, PORT })).toThrow(/PORT inválido/);
+    }
+    expect(() => lerConfig({ ...base, TRUST_PROXY: 'sim' })).toThrow(/TRUST_PROXY inválido/);
+  });
 });

@@ -1,0 +1,46 @@
+# Manifestos Kubernetes do GARMS (Kustomize, já vem com o kubectl). Aplicar a partir da raiz:
+#   node deploy/k8s/secrets.mjs          # 1.º: Secrets a partir do .env (não estão no Git)
+#   kubectl apply -k deploy/             # 2.º: tudo o resto
+# Ver deploy/k8s/README.md.
+#
+# Este ficheiro está em deploy/ (e não em deploy/k8s/) para reutilizar a mesma configuração
+# do docker-compose (redis/redis.conf, rabbitmq/*): o Kustomize só lê ficheiros dentro da sua pasta.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: garms
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: garms
+    includeSelectors: false
+
+resources:
+  - k8s/namespace.yaml
+  - k8s/redis.yaml
+  - k8s/rabbitmq.yaml
+  - k8s/eapi.yaml
+  - k8s/ingress.yaml
+
+configMapGenerator:
+  # Configuração não secreta, comum aos serviços Node
+  - name: garms-config
+    literals:
+      - LOG_LEVEL=info
+      # Um proxy à frente da EAPI (o Traefik): o IP do cliente vem em X-Forwarded-For
+      - TRUST_PROXY=1
+  - name: redis-config
+    files:
+      - redis/redis.conf
+  - name: rabbitmq-config
+    files:
+      - rabbitmq/10-garms.conf
+      - rabbitmq/definitions.json
+
+# Imagens: por omissão as do GHCR (publicadas pela CI a cada merge na main).
+# Para testar uma imagem construída no PC sem a publicar, ver deploy/k8s/README.md.
+images:
+  - name: garms-eapi
+    newName: ghcr.io/yurimor00/garms-eapi
+    newTag: latest

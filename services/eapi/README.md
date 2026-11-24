@@ -17,7 +17,7 @@ Ainda **não** tem a validação do token do Auth0, o rate limiting nem as rotas
 | No Windows, a desenvolver | `npm run dev:eapi` (reinicia a cada alteração) | `REDIS_URL` e `RABBITMQ_URL` do `.env` (localhost) |
 | No Docker | `docker compose --env-file .env -f deploy/docker-compose.yml up -d --build eapi` | Hosts `redis` e `rabbitmq` do compose |
 
-No Docker a porta fica em `127.0.0.1:3000` (`EAPI_PORT`). Logs: `docker logs -f garms-eapi`.
+No Docker a porta fica em `127.0.0.1:3000` (`EAPI_PORT` no `.env` muda a porta publicada no PC). Logs: `docker logs -f garms-eapi`.
 
 ## Variáveis de ambiente
 
@@ -25,7 +25,7 @@ No Docker a porta fica em `127.0.0.1:3000` (`EAPI_PORT`). Logs: `docker logs -f 
 | --- | --- | --- |
 | `REDIS_URL` | Sim | Cache partilhada (rate limiting, `sub` → `idUtilizador`, catálogo) |
 | `RABBITMQ_URL` | Sim | Eventos (`recommendation.ready`, `weather.alert` para o WebSocket) |
-| `EAPI_PORT` | Não (3000) | Porta |
+| `PORT` | Não (3000) | Porta onde a EAPI escuta. **Não** usar `EAPI_PORT`: o Kubernetes injeta essa variável (`tcp://IP:porta`) para o Service `eapi` |
 | `LOG_LEVEL` | Não (`info`) | `error`, `warn`, `info` ou `debug` |
 | `TRUST_PROXY` | Não | Número de proxies à frente (1 no cluster, atrás do Traefik); vazio em local |
 

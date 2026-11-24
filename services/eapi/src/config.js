@@ -14,13 +14,26 @@ export function lerConfig(env = process.env) {
     throw new Error(`LOG_LEVEL inválido: ${nivelLog} (usar ${NIVEIS_LOG.join(', ')})`);
   }
 
+  // Só PORT. Não usar <SERVICO>_PORT: o Kubernetes injeta variáveis com esse nome para cada Service
+  // (ex.: EAPI_PORT=tcp://10.0.0.1:3000). No compose, EAPI_PORT é só a porta publicada no PC.
+  const porta = inteiro(env.PORT, 3000, 'PORT', 1, 65535);
+
   return {
-    porta: Number(env.EAPI_PORT ?? env.PORT ?? 3000),
+    porta,
     nivelLog,
     redisUrl: env.REDIS_URL,
     rabbitmqUrl: env.RABBITMQ_URL,
     // Atrás do Traefik (e do Cloudflare) o IP do cliente vem em X-Forwarded-For.
     // Só confiar nesse cabeçalho quando há mesmo um proxy à frente (no cluster), senão pode ser falsificado.
-    trustProxy: env.TRUST_PROXY ? Number(env.TRUST_PROXY) : false,
+    trustProxy: env.TRUST_PROXY ? inteiro(env.TRUST_PROXY, 0, 'TRUST_PROXY', 0, 10) : false,
   };
+}
+
+function inteiro(valor, omissao, nome, minimo, maximo) {
+  if (valor === undefined || valor === '') return omissao;
+  const numero = Number(valor);
+  if (!Number.isInteger(numero) || numero < minimo || numero > maximo) {
+    throw new Error(`${nome} inválido: "${valor}" (inteiro entre ${minimo} e ${maximo})`);
+  }
+  return numero;
 }

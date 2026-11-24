@@ -1,8 +1,8 @@
 # GARMS: ambiente local (Docker Desktop)
 # Correr a partir da raiz do repositório:
 #   docker compose --env-file .env -f deploy/docker-compose.yml up -d
-# Por agora tem o MySQL, o RabbitMQ, o Cloudflare Tunnel e um nginx de teste;
-# Redis, serviços e frontend entram aqui depois.
+# Por agora tem o MySQL, o RabbitMQ, o Redis, o Cloudflare Tunnel e um nginx de teste;
+# serviços e frontend entram aqui depois.
 
 name: garms
 
@@ -77,6 +77,56 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # Redis: cache partilhada (previsão do tempo, alertas, rate limiting, sub → idUtilizador).
+  redis:
+    image: redis:7.4-alpine
+    container_name: garms-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Falta REDIS_PASSWORD no .env}
+      # O redis-cli do healthcheck lê a password daqui (não aparece nos argumentos)
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    # $$ = variável lida dentro do container (a password não fica escrita no comando do compose)
+    command: ["sh", "-c", "exec redis-server /usr/local/etc/redis/redis.conf --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      # Só no próprio PC (os serviços a correr no Windows usam localhost)
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - garms-redis-data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  # Redis Insight: painel para ver chaves, TTL, memória e comandos em tempo real (Profiler).
+  # Já vem ligado ao Redis; abrir em http://localhost:5540. Só para depurar, nunca exposto.
+  # Profile "ferramentas": NÃO arranca com o "up -d" normal. Ligar e desligar à mão:
+  #   docker compose --env-file .env -f deploy/docker-compose.yml up -d redisinsight
+  #   docker compose --env-file .env -f deploy/docker-compose.yml stop redisinsight
+  redisinsight:
+    image: redis/redisinsight:3.10.2
+    container_name: garms-redisinsight
+    profiles: ["ferramentas"]
+    # Não volta a arrancar sozinho (nem quando o Docker Desktop reinicia)
+    restart: "no"
+    environment:
+      RI_REDIS_HOST: redis
+      RI_REDIS_PORT: "6379"
+      RI_REDIS_ALIAS: GARMS (local)
+      RI_REDIS_PASSWORD: ${REDIS_PASSWORD:?Falta REDIS_PASSWORD no .env}
+      # Salta o ecrã dos termos; a telemetria fica desligada nas definições
+      RI_ACCEPT_TERMS_AND_CONDITIONS: "true"
+    ports:
+      - "127.0.0.1:${REDISINSIGHT_PORT:-5540}:5540"
+    # Sem volume de propósito: a ligação vem destas variáveis a cada arranque,
+    # e assim a password não fica guardada num volume.
+    depends_on:
+      redis:
+        condition: service_healthy
+
   # Cloudflare Tunnel: liga o domínio a este ambiente sem abrir portas no router.
   # O destino de cada hostname é configurado no painel do Zero Trust e usa o nome
   # do serviço do compose (ex.: http://nginx:8080), nunca localhost.
@@ -101,3 +151,4 @@ services:
 volumes:
   garms-mysql-data:
   garms-rabbitmq-data:
+  garms-redis-data:

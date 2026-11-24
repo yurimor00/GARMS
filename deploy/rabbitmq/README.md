@@ -38,15 +38,24 @@ utilizador no `definitions.json` obrigaria a fazer commit do hash da password.
 
 ## 3. Topologia
 
+| Fila | Consumidor | Routing keys | Para quê |
+| --- | --- | --- | --- |
+| `reco.events` | Recommendation Service | `user.#`, `wardrobe.#`, `planner.#`, `weather.#` | Cópia das preferências, novas sugestões, limpeza do `dw_reco` |
+| `wardrobe-papi.events` | Wardrobe PAPI | `user.deleted` | Apagar as fotos do utilizador no bucket (PER-08) |
+| `weather-sapi.events` | Weather SAPI | `user.location.updated` | Seguir o local e registá-lo no fornecedor de alertas |
+
+Cada fila tem a sua DLQ (`<fila>.dlq`), ligada ao `dw.events.dlx` com o nome da fila como routing key:
+
 ```
-dw.events (topic) ──user.*──────┐
-                  ──wardrobe.#──┤
-                  ──planner.#───┼──► reco.events (quorum, x-delivery-limit 5)
-                  ──weather.#───┘          │ rejeitada 5 vezes
-                                           ▼
-                        dw.events.dlx (direct) ──reco.events──► reco.events.dlq
+dw.events (topic) ──user.#, wardrobe.#, planner.#, weather.#──► reco.events ──┐
+                  ──user.deleted───────────────────────────────► wardrobe-papi.events ──┤ rejeitada 5 vezes
+                  ──user.location.updated──────────────────────► weather-sapi.events ──┘
+                                                                                │
+dw.events.dlx (direct) ──<nome da fila>──► reco.events.dlq / wardrobe-papi.events.dlq / weather-sapi.events.dlq
 ```
 
+- **Routing keys:** no exchange topic, `*` corresponde a exatamente uma palavra e `#` a zero ou mais.
+  `user.*` apanharia `user.deleted` mas não `user.location.updated`; por isso usa-se `user.#`.
 - Filas **quorum** e duráveis: sobrevivem a reinícios e contam as entregas. Ao fim de 5 entregas
   falhadas (`nack`/`reject` com requeue) a mensagem vai para a DLQ, em vez de ficar em ciclo.
 - Os serviços publicam com `persistent: true` e fazem `ack` manual só depois de processar.
@@ -76,8 +85,10 @@ docker exec garms-rabbitmq rabbitmqadmin -u garms -p <password> -V garms publish
 ## Alterar a topologia e recomeçar
 
 - **Depois de editar o `definitions.json`:** `docker compose --env-file .env -f deploy/docker-compose.yml up -d rabbitmq-init`
-  (filas e bindings novos são criados; os que já existem ficam iguais). Mudar os argumentos de uma fila
-  que já existe não tem efeito: é preciso apagá-la (no painel) e voltar a correr o init.
+  (filas e bindings novos são criados; os que já existem ficam iguais). A importação só acrescenta:
+  um binding retirado do ficheiro continua no broker até ser apagado (no painel, ou com
+  `rabbitmqadmin delete binding`). Mudar os argumentos de uma fila que já existe também não tem efeito:
+  é preciso apagá-la e voltar a correr o init.
 - **Recomeçar do zero** (apaga mensagens e utilizador, mantém o MySQL):
   `docker compose --env-file .env -f deploy/docker-compose.yml rm -sf rabbitmq`,
   `docker volume rm garms_garms-rabbitmq-data` e depois `up -d rabbitmq rabbitmq-init`.

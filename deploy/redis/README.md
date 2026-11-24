@@ -46,9 +46,36 @@ docker compose --env-file .env -f deploy/docker-compose.yml ps redis      # espe
 - **Quando os serviços estiverem neste compose:** host `redis` (`redis://:<password>@redis:6379/0`).
 - **Prefixo das chaves por serviço:** `eapi:…`, `weather:…`, para não haver colisões (ex.: `weather:forecast:37.74:-25.67`).
 
-## 5. Verificar e depurar
+## 5. Painel: Redis Insight
+
+O painel está **desligado por omissão** (profile `ferramentas` do compose): o `up -d` normal não o arranca.
+Liga-se só quando se quer ver o que o Redis está a fazer:
 
 ```powershell
+docker compose --env-file .env -f deploy/docker-compose.yml up -d redisinsight   # ligar (~10 s a arrancar)
+docker compose --env-file .env -f deploy/docker-compose.yml stop redisinsight    # desligar
+```
+
+Também se pode ligar e desligar no Docker Desktop (botão ▶/■ do `garms-redisinsight`), depois de ter sido criado uma vez.
+Já vem ligado ao Redis (ligação «GARMS (local)»). Abrir <http://localhost:5540> (só no próprio PC; porta em `REDISINSIGHT_PORT`).
+
+- **Browser:** chaves, valores, tipo e TTL a contar; pesquisa por padrão (`weather:*`).
+- **Profiler:** comandos que os serviços enviam, em tempo real (o mesmo que `redis-cli monitor`).
+- **Analysis:** memória por prefixo e chaves sem TTL (que não deviam existir).
+- **Workbench:** consola com autocompletar.
+
+Notas:
+- Telemetria e notificações desligadas; os termos são aceites pela variável `RI_ACCEPT_TERMS_AND_CONDITIONS`.
+- Sem volume, de propósito: a ligação vem das variáveis a cada arranque e a password não fica guardada.
+  O histórico do Workbench perde-se ao recriar o container.
+- Como `CONFIG` está desligado, o separador de configuração do servidor pode mostrar avisos.
+- Para parar tudo, incluindo o painel: `docker compose --env-file .env -f deploy/docker-compose.yml --profile ferramentas down`
+  (o `down` sem `--profile` deixa o painel de fora).
+
+## 6. Linha de comandos
+
+```powershell
+docker exec -it garms-redis redis-cli monitor              # comandos em tempo real (Ctrl+C para sair)
 docker exec garms-redis redis-cli ping                    # PONG (a password vem de REDISCLI_AUTH)
 docker exec garms-redis redis-cli --scan --pattern 'weather:*'
 docker exec garms-redis redis-cli ttl <chave>

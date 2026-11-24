@@ -1,8 +1,8 @@
 # GARMS: ambiente local (Docker Desktop)
 # Correr a partir da raiz do repositório:
 #   docker compose --env-file .env -f deploy/docker-compose.yml up -d
-# Por agora tem o MySQL, o RabbitMQ, o Cloudflare Tunnel e um nginx de teste;
-# Redis, serviços e frontend entram aqui depois.
+# Por agora tem o MySQL, o RabbitMQ, o Redis, o Cloudflare Tunnel e um nginx de teste;
+# serviços e frontend entram aqui depois.
 
 name: garms
 
@@ -77,6 +77,30 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  # Redis: cache partilhada (previsão do tempo, alertas, rate limiting, sub → idUtilizador).
+  redis:
+    image: redis:7.4-alpine
+    container_name: garms-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Falta REDIS_PASSWORD no .env}
+      # O redis-cli do healthcheck lê a password daqui (não aparece nos argumentos)
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    # $$ = variável lida dentro do container (a password não fica escrita no comando do compose)
+    command: ["sh", "-c", "exec redis-server /usr/local/etc/redis/redis.conf --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      # Só no próprio PC (os serviços a correr no Windows usam localhost)
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - garms-redis-data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
   # Cloudflare Tunnel: liga o domínio a este ambiente sem abrir portas no router.
   # O destino de cada hostname é configurado no painel do Zero Trust e usa o nome
   # do serviço do compose (ex.: http://nginx:8080), nunca localhost.
@@ -101,3 +125,4 @@ services:
 volumes:
   garms-mysql-data:
   garms-rabbitmq-data:
+  garms-redis-data:
